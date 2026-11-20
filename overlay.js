@@ -1,6 +1,7 @@
 (() => {
-  if (globalThis.youtubeDualSubtitlesV2) return;
-  globalThis.youtubeDualSubtitlesV2 = true;
+  const prev = globalThis.youtubeDualSubtitlesV2;
+  if (prev && prev.runtimeId === chrome.runtime?.id) return;
+  try { prev?.teardown?.(); } catch {}
 
   const STORAGE_PREFS_KEY = 'yt_dual_subs_overlay_prefs_v2';
   let prefs = { bottomPct: 11, fontScale: 1.0, showHistory: false };
@@ -430,7 +431,7 @@
   btnStop.addEventListener('click', (e) => {
     e.stopPropagation();
     if (currentId) {
-      void chrome.runtime.sendMessage({ target: 'background', type: 'overlayStop', id: currentId }).catch(() => {});
+      safeSend({ target: 'background', type: 'overlayStop', id: currentId });
     }
   });
 
@@ -580,11 +581,46 @@
     currCard.hidden = true;
   }
 
+  const PLAYBACK_EVENTS = ['playing', 'canplay', 'timeupdate', 'pause', 'seeking', 'seeked', 'ended', 'emptied'];
+
+  function teardown() {
+    currentId = null;
+    clearTimeout(fadeTimer);
+    clearTimeout(noticeTimer);
+    for (const event of PLAYBACK_EVENTS) {
+      document.removeEventListener(event, onPlayback, true);
+    }
+    try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
+    host.remove();
+    if (globalThis.youtubeDualSubtitlesV2?.teardown === teardown) {
+      delete globalThis.youtubeDualSubtitlesV2;
+    }
+  }
+
+  function safeSend(message) {
+    if (!chrome.runtime?.id) {
+      teardown();
+      return;
+    }
+    try {
+      const result = chrome.runtime.sendMessage(message);
+      if (result && typeof result.catch === 'function') {
+        result.catch(() => {});
+      }
+    } catch {
+      teardown();
+    }
+  }
+
   function isPlaying(video) {
     return Boolean(video && !video.paused && !video.ended);
   }
 
   function onPlayback(event) {
+    if (!chrome.runtime?.id) {
+      teardown();
+      return;
+    }
     if (!currentId || !event.target.matches?.('#movie_player video')) return;
     // Ignore transient 'waiting' micro-buffering on YouTube Live so audio stream isn't killed
     if (event.type === 'waiting') return;
@@ -599,20 +635,20 @@
       interimTranslated = '';
       renderCards();
     }
-    void chrome.runtime.sendMessage({
+    safeSend({
       target: 'background',
       type: 'playback',
       id: currentId,
       revision,
       playing,
-    }).catch(() => {});
+    });
   }
 
-  for (const event of ['playing', 'canplay', 'timeupdate', 'pause', 'seeking', 'seeked', 'ended', 'emptied']) {
+  for (const event of PLAYBACK_EVENTS) {
     document.addEventListener(event, onPlayback, true);
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  function onMessage(message, sender, reply) {
     if (message.target !== 'overlay' || sender.id !== chrome.runtime.id) return;
 
     if (message.type === 'start') {
@@ -706,5 +742,8 @@
         renderCards();
       }
     }
-  });
+  }
+
+  chrome.runtime.onMessage.addListener(onMessage);
+  globalThis.youtubeDualSubtitlesV2 = { runtimeId: chrome.runtime?.id, teardown };
 })();
