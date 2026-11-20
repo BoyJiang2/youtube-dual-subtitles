@@ -63,12 +63,13 @@ function makeWav16k(chunks, sampleRate = 16000) {
 }
 
 export function getAsrSampleRate(provider) {
-  return provider === 'openai' ? 24000 : 16000;
+  return provider === 'openai' || provider === 'openai-live' ? 24000 : 16000;
 }
 
 export class StreamingASR {
   constructor({ provider, apiKey, sourceLanguage = 'multi', onInterim, onFinal, onStatus, onError }) {
-    this.provider = provider;
+    this.liveTranscribe = provider === 'openai-live';
+    this.provider = this.liveTranscribe ? 'openai' : provider;
     this.apiKey = apiKey;
     this.sourceLanguage = sourceLanguage;
     this.onInterim = onInterim;
@@ -96,6 +97,9 @@ export class StreamingASR {
 
     // OpenAI Realtime state
     this.itemBuffers = new Map();
+    this.itemOrder = new Map();
+    this.itemSequence = 0;
+    this.latestTranscript = 0;
     this.openaiUseBetaFallback = false;
     this.openaiBufferedMs = 0;
     this.openaiVoicedMs = 0;
@@ -140,25 +144,30 @@ export class StreamingASR {
     }
   }
 
-  emitInterim(text) {
+  emitInterim(text, sequence) {
     if (!text) return;
     this.gotFirstTranscript = true;
     this.stopDiagnostics();
-    this.onInterim?.(text);
+    this.onInterim?.(text, sequence);
   }
 
-  emitFinal(text) {
+  emitFinal(text, sequence) {
     if (!text) return;
     this.gotFirstTranscript = true;
     this.stopDiagnostics();
-    this.onFinal?.(text);
+    this.onFinal?.(text, sequence);
+  }
+
+  openAITranscriptionConfig() {
+    const language = this.sourceLanguage && this.sourceLanguage !== 'multi' ? this.sourceLanguage : null;
+    if (this.liveTranscribe) {
+      return { model: 'gpt-live-transcribe', delay: 'low', ...(language && { languages: [language] }) };
+    }
+    return { model: 'gpt-4o-mini-transcribe', ...(language && { language }) };
   }
 
   async mintOpenAIEphemeralToken() {
-    const transcription = { model: 'gpt-4o-mini-transcribe' };
-    if (this.sourceLanguage && this.sourceLanguage !== 'multi') {
-      transcription.language = this.sourceLanguage;
-    }
+    const transcription = this.openAITranscriptionConfig();
     try {
       const resp = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
         method: 'POST',
@@ -194,10 +203,7 @@ export class StreamingASR {
 
   sendOpenAISessionConfig() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const transcription = { model: 'gpt-4o-mini-transcribe' };
-    if (this.sourceLanguage && this.sourceLanguage !== 'multi') {
-      transcription.language = this.sourceLanguage;
-    }
+    const transcription = this.openAITranscriptionConfig();
 
     if (this.openaiUseBetaFallback) {
       this.ws.send(JSON.stringify({
@@ -290,6 +296,8 @@ export class StreamingASR {
       this.ws.onopen = () => {
         clearTimeout(openTimeout);
         this.reconnectAttempts = 0;
+        this.itemBuffers.clear();
+        this.itemOrder.clear();
         this.lastAudioSentAt = Date.now();
         this.openaiBufferedMs = 0;
         this.openaiVoicedMs = 0;
@@ -414,8 +422,10 @@ export class StreamingASR {
       if (isActiveSound) this.openaiVoicedMs += chunkMs;
       this.openaiQuietMs = isQuietDip ? this.openaiQuietMs + chunkMs : 0;
 
-      const naturalPause = this.openaiBufferedMs >= 1500 && this.openaiQuietMs >= 300;
-      const maxWindowReached = this.openaiBufferedMs >= 3200;
+      const naturalPause = this.openaiBufferedMs >= 900 && this.openaiQuietMs >= 200;
+      // Live Transcribe already streams before commit; give a continuous clause
+      // more room. The economy model needs an early commit to start recognition.
+      const maxWindowReached = this.openaiBufferedMs >= (this.liveTranscribe ? 4500 : 2000);
 
       if (this.openaiVoicedMs >= 400 && (naturalPause || maxWindowReached)) {
         this.commitOpenAIBuffer();
@@ -442,8 +452,8 @@ export class StreamingASR {
     if (isActiveSound) this.httpVoicedMs += chunkMs;
     this.httpQuietMs = isQuietDip ? this.httpQuietMs + chunkMs : 0;
 
-    const naturalPause = this.httpBufferedMs >= 1800 && this.httpQuietMs >= 300;
-    const maxWindowReached = this.httpBufferedMs >= 3600;
+    const naturalPause = this.httpBufferedMs >= 1200 && this.httpQuietMs >= 200;
+    const maxWindowReached = this.httpBufferedMs >= 2400;
 
     if (this.httpVoicedMs >= 400 && (naturalPause || maxWindowReached)) {
       const chunksToSend = this.httpChunks;
@@ -463,7 +473,7 @@ export class StreamingASR {
 
   async transcribeHttpChunks(chunks) {
     if (this.closed || !chunks.length) return;
-    this.commitsSent++;
+    const sequence = ++this.commitsSent;
     const wav = makeWav16k(chunks, 16000);
     const form = new FormData();
     form.set('file', wav, 'live.wav');
@@ -493,7 +503,8 @@ export class StreamingASR {
         return;
       }
       const text = (data?.text || '').trim();
-      if (text && !this.closed) {
+      if (text && !this.closed && !controller.signal.aborted && sequence > this.latestTranscript) {
+        this.latestTranscript = sequence;
         this.httpLastPrompt = text;
         this.emitFinal(text);
       }
@@ -571,19 +582,29 @@ export class StreamingASR {
     this.lastServerEvent = type || '';
     if (type === 'session.updated' || type === 'transcription_session.updated') {
       this.onStatus?.('OpenAI Realtime 就绪，正在监听音频…');
-    } else if (type === 'conversation.item.input_audio_transcription.delta') {
+    } else if (type === 'input_audio_buffer.committed') {
+      // Commit acknowledgements follow the audio timeline. Transcriptions may finish out of order.
+      if (!this.itemOrder.has(data.item_id)) this.itemOrder.set(data.item_id, ++this.itemSequence);
+    } else if (type === 'conversation.item.input_audio_transcription.delta' ||
+               type === 'conversation.item.input_audio_transcription.completed') {
       const id = data.item_id || 'default';
-      const prev = this.itemBuffers.get(id) || '';
-      const next = prev + (data.delta || '');
-      this.itemBuffers.set(id, next);
-      if (next.trim()) this.emitInterim(next.trim());
-    } else if (type === 'conversation.item.input_audio_transcription.completed') {
-      const id = data.item_id || 'default';
-      this.itemBuffers.delete(id);
-      const text = (data.transcript || '').trim();
-      if (text) this.emitFinal(text);
+      if (!this.itemOrder.has(id)) this.itemOrder.set(id, ++this.itemSequence);
+      const sequence = this.itemOrder.get(id);
+      const final = type.endsWith('.completed');
+      const text = final ? data.transcript || '' : (this.itemBuffers.get(id) || '') + (data.delta || '');
+      if (final) {
+        this.itemOrder.delete(id);
+        this.itemBuffers.delete(id);
+      } else {
+        this.itemBuffers.set(id, text);
+      }
+      if (!text.trim() || sequence < this.latestTranscript) return;
+      this.latestTranscript = sequence;
+      if (final) this.emitFinal(text.trim(), sequence);
+      else this.emitInterim(text.trim(), sequence);
     } else if (type === 'conversation.item.input_audio_transcription.failed') {
       const id = data.item_id || 'default';
+      this.itemOrder.delete(id);
       this.itemBuffers.delete(id);
       const errMsg = data.error?.message || 'OpenAI 实时语音转写失败。';
       const code = data.error?.code || '';
@@ -592,13 +613,13 @@ export class StreamingASR {
     } else if (type === 'error') {
       const errMsg = data.error?.message || 'OpenAI Realtime 返回错误。';
       const code = data.error?.code || '';
-      if (!this.openaiUseBetaFallback && /unknown_parameter|invalid_value|session\.update/i.test(`${code} ${errMsg}`)) {
+      if (!this.liveTranscribe && !this.openaiUseBetaFallback && /unknown_parameter|invalid_value|session\.update/i.test(`${code} ${errMsg}`)) {
         this.openaiUseBetaFallback = true;
         this.onStatus?.('正在切换 OpenAI 兼容协议重连…');
         try { this.ws?.close(1000, 'fallback'); } catch {}
         return;
       }
-      const fatal = /invalid_api_key|insufficient_quota|authentication|session_expired/i.test(`${code} ${errMsg}`);
+      const fatal = /invalid_api_key|insufficient_quota|authentication|session_expired|model_not_found|invalid_value|unknown_parameter/i.test(`${code} ${errMsg}`);
       this.onError?.(Object.assign(new Error(`OpenAI: ${errMsg}`), { fatal }));
     }
   }

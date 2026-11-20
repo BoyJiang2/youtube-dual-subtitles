@@ -4,7 +4,7 @@
   try { prev?.teardown?.(); } catch {}
 
   const STORAGE_PREFS_KEY = 'yt_dual_subs_overlay_prefs_v2';
-  // bgMode: 'glass' (default frosted dark) | 'solid' (high contrast) | 'outline' (transparent text outline)
+  // bgMode: 'glass' (default translucent dark) | 'solid' (high contrast) | 'outline' (transparent text outline)
   let prefs = { bottomPct: 10, fontScale: 1.0, showHistory: false, bgMode: 'glass' };
   try {
     const raw = localStorage.getItem(STORAGE_PREFS_KEY);
@@ -38,11 +38,6 @@
     @keyframes pulseDot {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.4; transform: scale(0.78); }
-    }
-
-    @keyframes fadeSlideUp {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
     }
 
     .caption-stage {
@@ -137,11 +132,8 @@
       background: rgba(9, 13, 18, 0.74);
       border: 1px solid rgba(255, 255, 255, 0.1);
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
       text-align: center;
       text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
-      animation: fadeSlideUp 0.16s ease-out;
       transition: opacity 0.22s ease, transform 0.22s ease, background 0.2s ease;
     }
 
@@ -167,11 +159,8 @@
         -1px 1px 0 rgba(0, 0, 0, 0.95);
     }
 
-    .cue-card.prev {
-      opacity: 0.62;
-      padding: 5px 14px;
-      border-radius: 10px;
-      transform: scale(0.92);
+    .cue-card.bilingual .line-translated:empty {
+      min-height: 1.4em;
     }
 
     .cue-card:empty, .cue-card[hidden] {
@@ -398,7 +387,7 @@
 
   const btnBgMode = document.createElement('button');
   btnBgMode.type = 'button';
-  btnBgMode.title = '切换字幕背景风格（磨砂 / 纯黑 / 无底描边）';
+  btnBgMode.title = '切换字幕背景风格（半透 / 纯黑 / 无底描边）';
 
   const div2 = document.createElement('span');
   div2.className = 'divider';
@@ -416,17 +405,6 @@
 
   toolbar.append(dragHandle, div1, btnSmaller, btnLarger, btnBgMode, div2, btnHistory, btnStop);
 
-  const prevCard = document.createElement('div');
-  prevCard.className = 'cue-card prev';
-  prevCard.hidden = true;
-  const prevOrig = document.createElement('div');
-  prevOrig.className = 'line-original';
-  prevOrig.dir = 'auto';
-  const prevTrans = document.createElement('div');
-  prevTrans.className = 'line-translated';
-  prevTrans.dir = 'auto';
-  prevCard.append(prevOrig, prevTrans);
-
   const currCard = document.createElement('div');
   currCard.className = 'cue-card';
   currCard.hidden = true;
@@ -443,7 +421,7 @@
   statusPill.hidden = true;
   statusPill.setAttribute('role', 'status');
 
-  stage.append(toolbar, prevCard, currCard, statusPill);
+  stage.append(toolbar, currCard, statusPill);
 
   // History drawer
   const drawer = document.createElement('aside');
@@ -471,7 +449,7 @@
   shadow.append(stage, drawer);
 
   const BG_MODES = ['glass', 'solid', 'outline'];
-  const BG_LABELS = { glass: '磨砂', solid: '深底', outline: '无底' };
+  const BG_LABELS = { glass: '半透', solid: '深底', outline: '无底' };
 
   function applyPrefs() {
     stage.style.setProperty('--bottom-pct', `${prefs.bottomPct}%`);
@@ -580,7 +558,9 @@
   const utterances = new Map();
   const historyEntries = [];
   let latestFinalId = 0;
-  let prevFinalId = 0;
+  let interimId = 0;
+  let previewSource = '';
+  let renderFrame = 0;
   let interimText = '';
   let interimTranslated = '';
   let currentTargetLang = '';
@@ -594,7 +574,7 @@
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       if (currentId && statusPill.hidden) stage.classList.add('faded');
-    }, 15_000);
+    }, 4_000);
   }
 
   function showNotice(text, persistMs = 4000, isError = false) {
@@ -612,52 +592,26 @@
     }
   }
 
+  function visibleTranslation(current, message) {
+    const next = message.translated || '';
+    // A longer source may start a fresh stream. Keep the readable prefix until
+    // its replacement catches up, or accept the finished wording at any length.
+    return message.done || next.length >= current.length ? next : current;
+  }
+
   function renderCards() {
-    const latestFinal = utterances.get(latestFinalId);
-    const prevFinal = utterances.get(prevFinalId);
-
-    if (interimText) {
-      if (latestFinal) {
-        prevCard.hidden = false;
-        prevOrig.textContent = latestFinal.original;
-        prevTrans.textContent = latestFinal.translated || '';
-        prevTrans.hidden = !latestFinal.translated;
-        prevTrans.lang = latestFinal.targetLanguage || currentTargetLang;
-      } else {
-        prevCard.hidden = true;
-      }
-
-      currCard.hidden = false;
-      currOrig.textContent = interimText;
-      currOrig.className = 'line-original interim';
-      currTrans.textContent = interimTranslated || '';
-      currTrans.className = 'line-translated preview';
-      currTrans.hidden = !interimTranslated;
-      currTrans.lang = currentTargetLang;
-      return;
-    }
-
-    if (prevFinal) {
-      prevCard.hidden = false;
-      prevOrig.textContent = prevFinal.original;
-      prevTrans.textContent = prevFinal.translated || '';
-      prevTrans.hidden = !prevFinal.translated;
-      prevTrans.lang = prevFinal.targetLanguage || currentTargetLang;
-    } else {
-      prevCard.hidden = true;
-    }
-
-    if (latestFinal) {
-      currCard.hidden = false;
-      currOrig.textContent = latestFinal.original;
-      currOrig.className = 'line-original';
-      currTrans.textContent = latestFinal.translated || '';
-      currTrans.className = 'line-translated';
-      currTrans.hidden = !latestFinal.translated;
-      currTrans.lang = latestFinal.targetLanguage || currentTargetLang;
-    } else {
-      currCard.hidden = true;
-    }
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      const latest = utterances.get(latestFinalId);
+      const original = interimText || latest?.original || '';
+      const translated = interimText ? interimTranslated : latest?.translated || '';
+      currCard.hidden = !original;
+      if (currOrig.textContent !== original) currOrig.textContent = original;
+      if (currTrans.textContent !== translated) currTrans.textContent = translated;
+      currOrig.classList.toggle('interim', Boolean(interimText));
+      currTrans.classList.toggle('preview', Boolean(interimText));
+    });
   }
 
   function appendHistoryItem(entry) {
@@ -680,7 +634,7 @@
 
     entry.domTrans = transEl;
 
-    const atBottom = historyList.scrollHeight - historyList.scrollTop - historyList.clientHeight < 48;
+    const atBottom = !drawer.hidden && historyList.scrollHeight - historyList.scrollTop - historyList.clientHeight < 48;
     historyList.append(item);
     historyEntries.push(entry);
     drawerTitle.textContent = `双语字幕记录 (${historyEntries.length})`;
@@ -708,10 +662,10 @@
     historyList.replaceChildren();
     drawerTitle.textContent = '双语字幕记录';
     latestFinalId = 0;
-    prevFinalId = 0;
+    interimId = 0;
+    previewSource = '';
     interimText = '';
     interimTranslated = '';
-    prevCard.hidden = true;
     currCard.hidden = true;
   }
 
@@ -724,6 +678,7 @@
     for (const event of PLAYBACK_EVENTS) {
       document.removeEventListener(event, onPlayback, true);
     }
+    cancelAnimationFrame(renderFrame);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     host.remove();
     if (globalThis.youtubeDualSubtitlesV2?.teardown === teardown) {
@@ -764,6 +719,9 @@
     playing = next;
     revision++;
     if (!playing) {
+      latestFinalId = 0;
+      interimId = 0;
+      previewSource = '';
       interimText = '';
       interimTranslated = '';
       renderCards();
@@ -788,6 +746,9 @@
       currentId = message.id;
       revision = 0;
       currentTargetLang = message.targetLanguage || '';
+      currTrans.lang = currentTargetLang;
+      currTrans.hidden = Boolean(message.originalOnly);
+      currCard.classList.toggle('bilingual', !message.originalOnly);
       resetState();
       attach();
       const player = document.querySelector('#movie_player');
@@ -833,28 +794,36 @@
 
       if (event === 'interim') {
         statusPill.hidden = true;
+        if (message.utteranceId <= latestFinalId || message.utteranceId < interimId) return;
         interimText = message.text || '';
-        if (!interimText) interimTranslated = '';
+        if (interimId !== message.utteranceId || !interimText.startsWith(previewSource)) {
+          interimTranslated = '';
+          previewSource = '';
+        }
+        interimId = message.utteranceId;
         bumpActivity();
         renderCards();
       } else if (event === 'interimTranslation') {
-        if (interimText) {
-          interimTranslated = message.translated || '';
-          bumpActivity();
-          renderCards();
-        }
+        const source = (message.original || '').replace(/[.。]+$/u, '').trimEnd();
+        if (interimId !== message.utteranceId || !source || !interimText.startsWith(source)) return;
+        const next = visibleTranslation(interimTranslated, message);
+        if (next === message.translated) previewSource = source;
+        interimTranslated = next;
+        renderCards();
       } else if (event === 'final') {
+        if (message.utteranceId <= latestFinalId || message.utteranceId < interimId) return;
         statusPill.hidden = true;
+        const carried = interimId === message.utteranceId && message.original.startsWith(previewSource)
+          ? interimTranslated : '';
         interimText = '';
         interimTranslated = '';
-        if (latestFinalId && latestFinalId !== message.utteranceId) {
-          prevFinalId = latestFinalId;
-        }
+        previewSource = '';
+        interimId = 0;
         latestFinalId = message.utteranceId;
         const entry = {
           utteranceId: message.utteranceId,
           original: message.original,
-          translated: '',
+          translated: visibleTranslation(carried, message),
           targetLanguage: message.targetLanguage || currentTargetLang,
           time: formatTime(),
         };
@@ -865,13 +834,14 @@
       } else if (event === 'translation') {
         const entry = utterances.get(message.utteranceId);
         if (!entry) return;
-        entry.translated = message.translated || '';
+        const next = visibleTranslation(entry.translated, message);
+        if (next === entry.translated) return;
+        entry.translated = next;
         if (entry.domTrans) {
           entry.domTrans.textContent = entry.translated;
           entry.domTrans.hidden = !entry.translated;
         }
-        bumpActivity();
-        renderCards();
+        if (!interimText && latestFinalId === entry.utteranceId) renderCards();
       }
     }
   }

@@ -32,8 +32,8 @@ let sessionState = await chrome.storage.session.get(null);
 let localState = await chrome.storage.local.get(null);
 let pending = false;
 
-asrProviderEl.value = localState.asrProvider || 'deepgram';
-translateProviderEl.value = localState.translateProvider || 'deepseek';
+asrProviderEl.value = localState.asrProvider || 'openai-live';
+translateProviderEl.value = localState.translateProvider || 'openai';
 sourceLangEl.value = sourceLanguages.some((l) => l.code === localState.sourceLanguage)
   ? localState.sourceLanguage
   : defaultSourceLanguage;
@@ -51,7 +51,7 @@ function render() {
   const running = sessionState.liveCapture;
   const apiKeys = localState.apiKeys || {};
   const asrProv = asrProviderEl.value;
-  const asrKeyBucket = asrProv === 'openai-http' ? 'openai' : asrProv;
+  const asrKeyBucket = asrProv === 'deepgram' ? 'deepgram' : 'openai';
   const transProv = translateProviderEl.value;
   const isOriginalOnly = modeEl.value === 'original';
   const sameProvider = !isOriginalOnly && asrKeyBucket === transProv;

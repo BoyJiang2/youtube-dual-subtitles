@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YouTube 双语直播字幕",
   "description": "面向无 CC 外语直播的实时流式语音识别与上下文双语翻译，直接在 YouTube 播放器上低延迟显示。",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "offscreen", "scripting", "storage", "tabCapture"],
   "host_permissions": [

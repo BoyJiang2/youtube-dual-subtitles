@@ -12,7 +12,7 @@
     <header>
       <div class="header-top">
         <span class="badge"><i class="dot"></i>YouTube 实时同传</span>
-        <span class="version">v2.1</span>
+        <span class="version">v2.2</span>
       </div>
       <h1>双语直播字幕</h1>
       <p class="subtitle">无 CC 外语直播 · 流式识别与上下文翻译</p>
@@ -23,12 +23,13 @@
         <div class="card-title">语音识别</div>
         <label for="asr-provider">识别引擎</label>
         <select id="asr-provider">
-          <option value="deepgram">Deepgram Nova-3（流式推荐 · 极速多语）</option>
-          <option value="openai">OpenAI Realtime（WebSocket 流式）</option>
+          <option value="openai-live">OpenAI 低延迟直播（$1.02 / 小时）</option>
+          <option value="openai">OpenAI 经济转写（约 $0.18 / 小时）</option>
+          <option value="deepgram">Deepgram Nova-3</option>
           <option value="openai-http">OpenAI 兼容转写（gpt-4o-mini-transcribe · 稳定）</option>
         </select>
 
-        <label for="asr-key" id="asr-key-label">Deepgram API 密钥</label>
+        <label for="asr-key" id="asr-key-label">OpenAI API 密钥</label>
         <input id="asr-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
 
         <label for="source-language">直播原语（指定可提升嘈杂直播准确率）</label>
@@ -46,15 +47,15 @@
         <div id="translate-settings">
           <label for="translate-provider">翻译引擎（流式输出）</label>
           <select id="translate-provider">
-            <option value="deepseek">DeepSeek（deepseek-chat · 高性价比）</option>
-            <option value="openai">OpenAI（gpt-4.1-mini）</option>
+            <option value="openai">OpenAI（GPT-6 Luna）</option>
+            <option value="deepseek">DeepSeek（deepseek-chat）</option>
           </select>
 
-          <div id="translate-key-group">
+          <div id="translate-key-group" hidden>
             <label for="translate-key" id="translate-key-label">DeepSeek API 密钥</label>
             <input id="translate-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
           </div>
-          <p class="shared-pill" id="shared-key-note" hidden>已自动共用上方 OpenAI API 密钥</p>
+          <p class="shared-pill" id="shared-key-note">已自动共用上方 OpenAI API 密钥</p>
 
           <label for="target-language">翻译目标语言</label>
           <select id="target-language"></select>

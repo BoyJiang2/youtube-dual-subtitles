@@ -14,141 +14,109 @@ function publish(session, payload) {
 }
 
 function cancelTranslations(session) {
-  if (session.previewController) {
-    session.previewController.abort();
-    session.previewController = null;
-  }
-  for (const controller of session.inFlight.values()) {
-    controller.abort();
-  }
+  clearTimeout(session.previewTimer);
+  session.preview?.controller.abort();
+  session.preview = null;
+  session.interim = '';
+  for (const job of session.inFlight.values()) job.controller.abort();
   session.inFlight.clear();
 }
 
 function updatePlayback({ id, playing, revision }) {
   if (!active || active.id !== id || revision <= active.revision) return;
+  cancelTranslations(active);
   active.revision = revision;
   active.playing = playing;
-  if (!playing) {
-    active.asr?.flush();
-  }
+  if (!playing) active.asr?.flush();
   active.worklet?.port.postMessage({ playing, revision });
 }
 
-async function runPreviewTranslation(session, interimText) {
-  if (session.originalOnly || !session.translator || Date.now() < session.translateResumeAt) return;
-  const now = Date.now();
-  if (now - session.lastPreviewAt < 1200) return;
-  if (interimText === session.lastPreviewText) return;
-
-  // Trigger preview only when speaker has been talking continuously without a pause
-  const wordCount = interimText.trim().split(/\s+/).length;
-  if (interimText.length < 40 && wordCount < 8) return;
-
-  session.lastPreviewAt = now;
-  session.lastPreviewText = interimText;
-
-  if (session.previewController) {
-    session.previewController.abort();
-  }
-  const controller = new AbortController();
-  session.previewController = controller;
-  const currentRevision = session.revision;
-
-  try {
-    let lastSent = 0;
-    const translated = await session.translator.translateStream(interimText, {
-      signal: controller.signal,
-      commitToHistory: false,
-      onDelta: (partial) => {
-        if (active !== session || controller.signal.aborted) return;
-        const t = Date.now();
-        if (t - lastSent >= 80) {
-          lastSent = t;
-          void publish(session, {
-            event: 'interimTranslation',
-            translated: partial,
-            targetLanguage: session.targetLanguage,
-            revision: currentRevision,
-          });
-        }
-      },
-    });
-    if (active === session && !controller.signal.aborted && translated) {
-      void publish(session, {
-        event: 'interimTranslation',
-        translated,
-        targetLanguage: session.targetLanguage,
-        revision: currentRevision,
-      });
-    }
-  } catch {
-    // Preview translation errors are non-fatal; wait for final utterance
-  } finally {
-    if (session.previewController === controller) {
-      session.previewController = null;
-    }
-  }
+function phrase(text) {
+  return text.trim().replace(/[.。]+$/u, '').trimEnd();
 }
 
-async function translateFinal(session, utteranceId, original, revision) {
-  if (session.originalOnly || !session.translator) return;
-  if (Date.now() < session.translateResumeAt) return;
+function queuePreview(session) {
+  const text = session.interim;
+  if (!session.translator || !text || Date.now() < session.translateResumeAt) return;
+  const previous = session.preview;
+  if (previous && (!previous.finished || phrase(previous.text) === phrase(text))) return;
+  const shortPhrase = /\s|[。！？.!?]$/u.test(text) || /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{3}/u.test(text);
+  if (text.length < 8 && !shortPhrase) return;
+  // Coalesce expansions while a stream is in flight, then translate the latest text.
+  const delay = previous ? previous.started + 650 - Date.now() : 0;
+  clearTimeout(session.previewTimer);
+  if (delay > 0) {
+    session.previewTimer = setTimeout(() => queuePreview(session), delay);
+    return;
+  }
+  startTranslation(session, session.nextId, text, false);
+}
 
-  // Cap concurrent translations so slow networks don't pile up stale requests
+function startTranslation(session, id, text, final) {
+  const revision = session.revision;
+  const job = { text, final, partial: '', finished: false, started: Date.now(), controller: new AbortController() };
+  if (!final) session.preview = job;
+  session.inFlight.delete(id); // A revised final can replace an aborted preview for this ID.
   if (session.inFlight.size >= MAX_IN_FLIGHT_TRANSLATIONS) {
-    const [oldestId] = session.inFlight.keys();
-    session.inFlight.get(oldestId)?.abort();
-    session.inFlight.delete(oldestId);
+    const [oldId, oldest] = session.inFlight.entries().next().value;
+    oldest.controller.abort();
+    session.inFlight.delete(oldId);
+  }
+  session.inFlight.set(id, job);
+  const valid = () => active === session && session.revision === revision && !job.controller.signal.aborted;
+  function send(translated, done) {
+    if (!valid()) return;
+    job.partial = translated;
+    if (!job.final && !phrase(session.interim).startsWith(phrase(job.text))) return;
+    void publish(session, {
+      event: job.final ? 'translation' : 'interimTranslation',
+      utteranceId: id, original: job.text, translated, done, revision,
+    });
   }
 
-  const controller = new AbortController();
-  session.inFlight.set(utteranceId, controller);
-
-  try {
-    let lastSent = 0;
-    const finalTranslated = await session.translator.translateStream(original, {
-      signal: controller.signal,
-      commitToHistory: true,
-      onDelta: (partial) => {
-        if (active !== session || controller.signal.aborted) return;
-        const now = Date.now();
-        if (now - lastSent >= 60) {
-          lastSent = now;
-          void publish(session, {
-            event: 'translation',
-            utteranceId,
-            translated: partial,
-            done: false,
-            targetLanguage: session.targetLanguage,
-            revision,
-          });
-        }
-      },
-    });
-
-    if (active === session && !controller.signal.aborted && finalTranslated) {
-      void publish(session, {
-        event: 'translation',
-        utteranceId,
-        translated: finalTranslated,
-        done: true,
-        targetLanguage: session.targetLanguage,
-        revision,
-      });
+  let lastSent = 0;
+  session.translator.translateStream(text, {
+    signal: job.controller.signal,
+    commitToHistory: false,
+    onDelta: partial => {
+      job.partial = partial;
+      if (Date.now() - lastSent >= 60) {
+        lastSent = Date.now();
+        send(partial, false);
+      }
+    },
+  }).then(translated => {
+    if (!valid()) return;
+    job.finished = true;
+    if (translated) {
+      send(translated, true);
+      if (job.final) session.translator.record(job.text, translated);
     }
-  } catch (error) {
-    if (controller.signal.aborted || active !== session) return;
+    if (!job.final && session.preview === job) queuePreview(session);
+  }).catch(error => {
+    if (!valid()) return;
+    job.finished = true;
+    job.partial = '';
     if (error.fatal) {
       session.playing = false;
       cancelTranslations(session);
       void publish(session, { ended: true, notice: error.message });
-      return;
+    } else if (job.final || error.backoff) {
+      session.translateResumeAt = Date.now() + (error.backoff ?? 2500);
+      void publish(session, { event: 'notice', notice: error.message, revision });
     }
-    session.translateResumeAt = Math.max(session.translateResumeAt, Date.now() + (error.backoff ?? 2500));
-    void publish(session, { event: 'notice', notice: error.message, revision });
-  } finally {
-    session.inFlight.delete(utteranceId);
-  }
+  }).finally(() => {
+    if (session.inFlight.get(id) === job) session.inFlight.delete(id);
+  });
+}
+
+function selectUtterance(session, id) {
+  if (id === session.nextId) return;
+  clearTimeout(session.previewTimer);
+  session.preview?.controller.abort();
+  session.preview = null;
+  session.interim = '';
+  session.nextId = id;
 }
 
 async function stop() {
@@ -189,11 +157,11 @@ async function start({
     targetLanguage,
     playing: Boolean(playback?.playing),
     revision: playback?.revision || 0,
-    utteranceId: 0,
+    nextId: 1,
     inFlight: new Map(),
-    previewController: null,
-    lastPreviewAt: 0,
-    lastPreviewText: '',
+    preview: null,
+    interim: '',
+    previewTimer: null,
     translateResumeAt: 0,
   };
   active = session;
@@ -219,36 +187,36 @@ async function start({
           void publish(session, { event: 'status', notice, revision: session.revision });
         }
       },
-      onInterim: (text) => {
-        if (active !== session) return;
-        void publish(session, {
-          event: 'interim',
-          text,
-          revision: session.revision,
-        });
-        if (text) {
-          void runPreviewTranslation(session, text);
-        }
+      onInterim: (text, id = session.nextId) => {
+        if (active !== session || !session.playing || id < session.nextId) return;
+        selectUtterance(session, id);
+        if (text === session.interim) return;
+        session.interim = text;
+        void publish(session, { event: 'interim', utteranceId: id, text, revision: session.revision });
+        queuePreview(session);
       },
-      onFinal: (text) => {
-        if (active !== session || !text) return;
-        if (session.previewController) {
-          session.previewController.abort();
-          session.previewController = null;
-        }
-        session.lastPreviewText = '';
-        const utteranceId = ++session.utteranceId;
-        const rev = session.revision;
+      onFinal: (text, id = session.nextId) => {
+        if (active !== session || !session.playing || !text || id < session.nextId) return;
+        selectUtterance(session, id);
+        clearTimeout(session.previewTimer);
+        const preview = session.preview;
+        const reuse = preview && phrase(text) === phrase(preview.text) &&
+          (!preview.finished || Boolean(preview.partial));
+        const translated = preview && phrase(text).startsWith(phrase(preview.text)) ? preview.partial : '';
+        session.preview = null;
+        session.interim = '';
+        session.nextId = id + 1;
         void publish(session, {
-          event: 'final',
-          utteranceId,
-          original: text,
-          originalOnly: session.originalOnly,
-          targetLanguage: session.targetLanguage,
-          revision: rev,
+          event: 'final', utteranceId: id, original: text, translated, done: Boolean(reuse && preview.finished),
+          originalOnly: session.originalOnly, targetLanguage: session.targetLanguage, revision: session.revision,
         });
-        if (!session.originalOnly) {
-          void translateFinal(session, utteranceId, text, rev);
+        if (reuse) {
+          preview.final = true;
+          preview.text = text;
+          if (preview.finished) session.translator.record(text, preview.partial);
+        } else {
+          preview?.controller.abort();
+          if (session.translator && Date.now() >= session.translateResumeAt) startTranslation(session, id, text, true);
         }
       },
       onError: (error) => {

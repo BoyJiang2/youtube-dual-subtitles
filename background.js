@@ -55,9 +55,9 @@ function validateKey(key, label) {
 
 async function start({
   tabId,
-  asrProvider = 'deepgram',
+  asrProvider = 'openai-live',
   asrKey,
-  translateProvider = 'deepseek',
+  translateProvider = 'openai',
   translateKey,
   sourceLanguage = defaultSourceLanguage,
   originalOnly = false,
@@ -69,19 +69,19 @@ async function start({
   const saved = await chrome.storage.local.get('apiKeys');
   const apiKeys = saved.apiKeys || {};
 
-  if (!['deepgram', 'openai', 'openai-http'].includes(asrProvider)) throw new Error('请选择语音识别服务。');
+  if (!['openai-live', 'deepgram', 'openai', 'openai-http'].includes(asrProvider)) throw new Error('请选择语音识别服务。');
   if (!originalOnly && !['deepseek', 'openai'].includes(translateProvider)) throw new Error('请选择翻译服务。');
   if (!sourceLanguages.some((l) => l.code === sourceLanguage)) sourceLanguage = defaultSourceLanguage;
   if (!targetLanguages.includes(targetLanguage)) targetLanguage = defaultTargetLanguage;
 
-  const asrKeyBucket = asrProvider === 'openai-http' ? 'openai' : asrProvider;
+  const asrKeyBucket = asrProvider === 'deepgram' ? 'deepgram' : 'openai';
   const resolvedAsrKey = asrKey?.trim() || apiKeys[asrKeyBucket];
   validateKey(resolvedAsrKey, asrKeyBucket === 'deepgram' ? 'Deepgram' : 'OpenAI');
 
   let resolvedTranslateKey = '';
   if (!originalOnly) {
     if (translateProvider === asrKeyBucket) {
-      resolvedTranslateKey = translateKey?.trim() || resolvedAsrKey;
+      resolvedTranslateKey = resolvedAsrKey;
     } else {
       resolvedTranslateKey = translateKey?.trim() || apiKeys[translateProvider];
     }

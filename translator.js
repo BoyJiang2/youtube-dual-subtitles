@@ -1,5 +1,5 @@
 // Contextual streaming (SSE) translator for live YouTube subtitles.
-// Supports DeepSeek (deepseek-chat) and OpenAI (gpt-4.1-mini) with a rolling
+// Supports DeepSeek (deepseek-chat) and OpenAI (gpt-6-luna) with a rolling
 // 4-utterance context window so translations stay coherent across live speech.
 
 export const translationProviders = Object.freeze({
@@ -17,8 +17,8 @@ export const translationProviders = Object.freeze({
     name: 'OpenAI',
     endpoint: 'https://api.openai.com/v1/chat/completions',
     body: {
-      model: 'gpt-4.1-mini',
-      temperature: 0.2,
+      model: 'gpt-6-luna',
+      reasoning_effort: 'none',
       max_completion_tokens: 256,
       store: false,
       stream: true,
