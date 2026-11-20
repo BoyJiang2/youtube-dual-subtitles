@@ -1,87 +1,164 @@
-import { defaultTargetLanguage, targetLanguages } from './languages.js';
+import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLanguages } from './languages.js';
 
-const provider = document.querySelector('#provider');
-const key = document.querySelector('#key');
-const synchronized = document.querySelector('#synchronized');
-const mode = document.querySelector('#subtitle-mode');
-const target = document.querySelector('#target-language');
-const targetSetting = document.querySelector('#target-setting');
-const toggle = document.querySelector('#toggle');
-const forget = document.querySelector('#forget');
-const message = document.querySelector('#message');
+const asrProviderEl = document.querySelector('#asr-provider');
+const asrKeyEl = document.querySelector('#asr-key');
+const asrKeyLabelEl = document.querySelector('#asr-key-label');
+const sourceLangEl = document.querySelector('#source-language');
+const modeEl = document.querySelector('#subtitle-mode');
+const translateSettingsEl = document.querySelector('#translate-settings');
+const translateProviderEl = document.querySelector('#translate-provider');
+const translateKeyGroupEl = document.querySelector('#translate-key-group');
+const translateKeyEl = document.querySelector('#translate-key');
+const translateKeyLabelEl = document.querySelector('#translate-key-label');
+const sharedKeyNoteEl = document.querySelector('#shared-key-note');
+const targetLangEl = document.querySelector('#target-language');
+const toggleBtn = document.querySelector('#toggle');
+const forgetBtn = document.querySelector('#forget');
+const messageEl = document.querySelector('#message');
+
 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 const supported = /^https:\/\/www\.youtube\.com\/(watch\?|live\/[\w-]+)/.test(tab?.url ?? '');
-let state = await chrome.storage.session.get(null);
-let pending = false;
-provider.value = state.selectedProvider || 'openai';
-synchronized.value = state.synchronized === false ? 'no' : 'yes';
-mode.value = state.originalOnly ? 'original' : 'dual';
+
+// Populate language dropdowns
+for (const { code, label } of sourceLanguages) {
+  sourceLangEl.add(new Option(label, code));
+}
 const languageLabels = new Intl.DisplayNames(['zh-CN'], { type: 'language' });
-for (const language of targetLanguages) target.add(new Option(languageLabels.of(language), language));
-target.value = targetLanguages.includes(state.targetLanguage) ? state.targetLanguage : defaultTargetLanguage;
+for (const lang of targetLanguages) {
+  targetLangEl.add(new Option(languageLabels.of(lang), lang));
+}
+
+let sessionState = await chrome.storage.session.get(null);
+let localState = await chrome.storage.local.get(null);
+let pending = false;
+
+asrProviderEl.value = localState.asrProvider || 'deepgram';
+translateProviderEl.value = localState.translateProvider || 'deepseek';
+sourceLangEl.value = sourceLanguages.some((l) => l.code === localState.sourceLanguage)
+  ? localState.sourceLanguage
+  : defaultSourceLanguage;
+modeEl.value = localState.originalOnly ? 'original' : 'dual';
+targetLangEl.value = targetLanguages.includes(localState.targetLanguage)
+  ? localState.targetLanguage
+  : defaultTargetLanguage;
 
 function report(text, isError = false) {
-  message.textContent = text;
-  message.dataset.error = isError;
+  messageEl.textContent = text;
+  messageEl.dataset.error = String(isError);
 }
 
 function render() {
-  const running = state.liveCapture;
-  toggle.textContent = running ? '停止字幕' : '启动字幕';
-  toggle.dataset.stopping = Boolean(running);
-  provider.disabled = key.disabled = synchronized.disabled = Boolean(running) || pending;
-  mode.disabled = target.disabled = Boolean(running) || pending;
-  targetSetting.hidden = mode.value === 'original';
-  toggle.disabled = pending || (!supported && !running);
-  forget.hidden = !Object.keys(state.apiKeys || {}).length;
-  forget.disabled = pending || Boolean(running);
-  key.placeholder = state.apiKeys?.[provider.value] ? '已有密钥，留空继续使用' : '粘贴所选服务商的密钥';
+  const running = sessionState.liveCapture;
+  const apiKeys = localState.apiKeys || {};
+  const asrProv = asrProviderEl.value;
+  const transProv = translateProviderEl.value;
+  const isOriginalOnly = modeEl.value === 'original';
+  const sameProvider = !isOriginalOnly && asrProv === transProv;
+
+  asrKeyLabelEl.textContent = asrProv === 'deepgram' ? 'Deepgram API 密钥' : 'OpenAI API 密钥';
+  asrKeyEl.placeholder = apiKeys[asrProv] ? '已保存密钥（留空继续使用）' : `粘贴 ${asrProv === 'deepgram' ? 'Deepgram' : 'OpenAI'} API 密钥`;
+
+  translateSettingsEl.hidden = isOriginalOnly;
+  translateKeyGroupEl.hidden = sameProvider;
+  sharedKeyNoteEl.hidden = !sameProvider;
+  translateKeyLabelEl.textContent = transProv === 'deepseek' ? 'DeepSeek API 密钥' : 'OpenAI API 密钥';
+  translateKeyEl.placeholder = apiKeys[transProv] ? '已保存密钥（留空继续使用）' : `粘贴 ${transProv === 'deepseek' ? 'DeepSeek' : 'OpenAI'} API 密钥`;
+
+  const locked = Boolean(running) || pending;
+  for (const el of [asrProviderEl, asrKeyEl, sourceLangEl, modeEl, translateProviderEl, translateKeyEl, targetLangEl]) {
+    el.disabled = locked;
+  }
+
+  toggleBtn.textContent = running ? '停止实时字幕' : '启动实时字幕';
+  toggleBtn.dataset.stopping = String(Boolean(running));
+  toggleBtn.disabled = pending || (!supported && !running);
+
+  forgetBtn.hidden = Object.keys(apiKeys).length === 0;
+  forgetBtn.disabled = locked;
+
   if (pending) return;
-  const notice = state.captureNotice;
+  const notice = sessionState.captureNotice;
   if (running) {
-    report(running.synchronized ? '同步观看正在运行。' :
-      (running.tabId === tab?.id ? '正在显示字幕。' : '字幕正在另一个标签页运行。'));
-  } else if (notice?.tabId === tab?.id && notice) {
+    report(running.tabId === tab?.id ? '实时字幕正在当前页面运行。' : '实时字幕正在另一个 YouTube 标签页运行。');
+  } else if (notice && notice.tabId === tab?.id) {
     report(notice.text, true);
   } else {
-    report(supported ? '' : '打开 YouTube 直播或视频页面后再启动。');
+    report(supported ? '' : '请先打开 YouTube 直播或视频页面。');
   }
 }
 
 async function operate(type) {
   pending = true;
   render();
-  report({ start: '正在连接标签页音频…', stop: '正在停止…', forget: '正在清除…' }[type]);
-  let error;
+  report({
+    start: '正在连接流式语音识别并捕获音频…',
+    stop: '正在停止…',
+    forget: '正在清除已保存的密钥…',
+  }[type]);
+
+  let error = '';
   try {
     const result = await chrome.runtime.sendMessage({
-      target: 'background', type, tabId: tab?.id, provider: provider.value,
-      synchronized: synchronized.value === 'yes',
-      originalOnly: mode.value === 'original', targetLanguage: target.value,
-      key: type === 'start' ? key.value : undefined,
+      target: 'background',
+      type,
+      tabId: tab?.id,
+      asrProvider: asrProviderEl.value,
+      asrKey: type === 'start' ? asrKeyEl.value : undefined,
+      translateProvider: translateProviderEl.value,
+      translateKey: type === 'start' ? translateKeyEl.value : undefined,
+      sourceLanguage: sourceLangEl.value,
+      originalOnly: modeEl.value === 'original',
+      targetLanguage: targetLangEl.value,
     });
-    if (!result?.ok) error = result?.error || '扩展未能完成操作，请重试。';
-    else key.value = '';
+    if (!result?.ok) {
+      error = result?.error || '操作失败，请重试。';
+    } else {
+      asrKeyEl.value = '';
+      translateKeyEl.value = '';
+    }
   } catch {
-    error = '扩展未能完成操作，请关闭弹窗后重试。';
+    error = '扩展后台无响应，请关闭弹窗后重试。';
   }
-  state = await chrome.storage.session.get(null);
+
+  sessionState = await chrome.storage.session.get(null);
+  localState = await chrome.storage.local.get(null);
   pending = false;
   render();
   if (error) report(error, true);
 }
 
-document.querySelector('form').addEventListener('submit', event => {
+document.querySelector('form').addEventListener('submit', (event) => {
   event.preventDefault();
-  if (!pending && !toggle.disabled) void operate(state.liveCapture ? 'stop' : 'start');
+  if (!pending && !toggleBtn.disabled) {
+    void operate(sessionState.liveCapture ? 'stop' : 'start');
+  }
 });
-provider.addEventListener('change', () => {
-  key.value = '';
+
+asrProviderEl.addEventListener('change', () => {
+  asrKeyEl.value = '';
   render();
 });
-mode.addEventListener('change', render);
-forget.addEventListener('click', () => void operate('forget'));
-chrome.storage.onChanged.addListener((_, area) => {
-  if (area === 'session') void chrome.storage.session.get(null).then(next => { state = next; render(); });
+
+translateProviderEl.addEventListener('change', () => {
+  translateKeyEl.value = '';
+  render();
 });
+
+modeEl.addEventListener('change', render);
+forgetBtn.addEventListener('click', () => void operate('forget'));
+
+chrome.storage.onChanged.addListener((_, area) => {
+  if (area === 'session') {
+    void chrome.storage.session.get(null).then((next) => {
+      sessionState = next;
+      render();
+    });
+  } else if (area === 'local') {
+    void chrome.storage.local.get(null).then((next) => {
+      localState = next;
+      render();
+    });
+  }
+});
+
 render();

@@ -1,8 +1,7 @@
-import { defaultTargetLanguage, targetLanguages } from './languages.js';
+import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLanguages } from './languages.js';
 
 const offscreenURL = chrome.runtime.getURL('offscreen.html');
 const popupURL = chrome.runtime.getURL('popup.html');
-const viewerURL = chrome.runtime.getURL('viewer.html');
 let operations = Promise.resolve();
 
 function enqueue(operation) {
@@ -13,105 +12,172 @@ function enqueue(operation) {
 
 function videoId(url) {
   if (!url) return null;
-  const page = new URL(url);
-  if (page.origin !== 'https://www.youtube.com') return null;
-  if (page.pathname === '/watch') return page.searchParams.get('v');
-  return /^\/live\/([\w-]+)\/?$/.exec(page.pathname)?.[1] ?? null;
+  try {
+    const page = new URL(url);
+    if (page.origin !== 'https://www.youtube.com') return null;
+    if (page.pathname === '/watch') return page.searchParams.get('v');
+    return /^\/live\/([\w-]+)\/?$/.exec(page.pathname)?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function captureDocument() {
-  const [context] = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [offscreenURL] });
+  const [context] = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [offscreenURL],
+  });
   return context;
 }
 
-function render(tabId, data) {
-  return chrome.tabs.sendMessage(tabId, { target: 'overlay', ...data }).catch(() => {});
+function sendToOverlay(tabId, data) {
+  return chrome.tabs.sendMessage(tabId, { target: 'overlay', ...data }).catch(() => null);
 }
 
 async function stop(session, notice = '') {
-  if (session.synchronized) {
-    await chrome.runtime.sendMessage({ target: 'viewer', type: 'stop', id: session.id, notice }).catch(() => {});
-  }
   if (await captureDocument()) {
     await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
   await chrome.storage.session.remove('liveCapture');
-  if (notice) await chrome.storage.session.set({ captureNotice: { tabId: session.tabId, text: notice } });
-  await render(session.tabId, { type: 'stop', id: session.id, notice });
+  if (notice) {
+    await chrome.storage.session.set({ captureNotice: { tabId: session.tabId, text: notice } });
+  }
+  await sendToOverlay(session.tabId, { type: 'stop', id: session.id, notice });
 }
 
-async function start({ tabId, provider, key, synchronized, originalOnly, targetLanguage = defaultTargetLanguage }) {
-  const { liveCapture, apiKeys = {} } = await chrome.storage.session.get(['liveCapture', 'apiKeys']);
-  if (liveCapture) throw new Error('已有标签页正在显示字幕，请先停止。');
-  if (!['openai', 'deepseek'].includes(provider)) throw new Error('请选择服务商。');
-  if (!targetLanguages.includes(targetLanguage)) throw new Error('请选择要翻译的语言。');
-  const apiKey = key?.trim() || apiKeys[provider];
-  if (!apiKey) throw new Error('请填写所选服务商的 API 密钥。');
-  if (!/^[\x21-\x7e]{1,512}$/.test(apiKey)) throw new Error('API 密钥格式无效，请检查是否复制完整。');
+function validateKey(key, label) {
+  if (!key) throw new Error(`请填写 ${label} 的 API 密钥。`);
+  if (!/^[\x21-\x7e]{1,512}$/.test(key)) {
+    throw new Error(`${label} API 密钥格式无效，请检查是否有多余空格或换行。`);
+  }
+}
+
+async function start({
+  tabId,
+  asrProvider = 'deepgram',
+  asrKey,
+  translateProvider = 'deepseek',
+  translateKey,
+  sourceLanguage = defaultSourceLanguage,
+  originalOnly = false,
+  targetLanguage = defaultTargetLanguage,
+}) {
+  const { liveCapture } = await chrome.storage.session.get('liveCapture');
+  if (liveCapture) throw new Error('已有标签页正在运行实时字幕，请先停止。');
+
+  const saved = await chrome.storage.local.get('apiKeys');
+  const apiKeys = saved.apiKeys || {};
+
+  if (!['deepgram', 'openai'].includes(asrProvider)) throw new Error('请选择语音识别服务。');
+  if (!originalOnly && !['deepseek', 'openai'].includes(translateProvider)) throw new Error('请选择翻译服务。');
+  if (!sourceLanguages.some((l) => l.code === sourceLanguage)) sourceLanguage = defaultSourceLanguage;
+  if (!targetLanguages.includes(targetLanguage)) targetLanguage = defaultTargetLanguage;
+
+  const resolvedAsrKey = asrKey?.trim() || apiKeys[asrProvider];
+  validateKey(resolvedAsrKey, asrProvider === 'deepgram' ? 'Deepgram' : 'OpenAI');
+
+  let resolvedTranslateKey = '';
+  if (!originalOnly) {
+    if (translateProvider === asrProvider) {
+      resolvedTranslateKey = translateKey?.trim() || resolvedAsrKey;
+    } else {
+      resolvedTranslateKey = translateKey?.trim() || apiKeys[translateProvider];
+    }
+    validateKey(resolvedTranslateKey, translateProvider === 'deepseek' ? 'DeepSeek' : 'OpenAI');
+  }
 
   const tab = await chrome.tabs.get(tabId);
   const video = videoId(tab.url);
-  if (!tab.active || !video) throw new Error('请从正在播放的 YouTube 视频页面打开扩展。');
+  if (!tab.active || !video) throw new Error('请在正在播放的 YouTube 直播或视频页面打开扩展。');
 
-  const session = { id: crypto.randomUUID(), tabId, video, provider, synchronized: synchronized === true };
+  const session = {
+    id: crypto.randomUUID(),
+    tabId,
+    video,
+    asrProvider,
+    translateProvider: originalOnly ? null : translateProvider,
+    originalOnly: Boolean(originalOnly),
+  };
+
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['overlay.js'] });
     if (!(await captureDocument())) {
       await chrome.offscreen.createDocument({
-        url: 'offscreen.html', reasons: ['USER_MEDIA'],
-        justification: '处理当前 YouTube 标签页的字幕音频并保留声音播放。',
+        url: 'offscreen.html',
+        reasons: ['USER_MEDIA'],
+        justification: '捕获当前 YouTube 标签页音频以进行实时流式语音识别与翻译。',
       });
     }
+
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-    if (videoId((await chrome.tabs.get(tabId)).url) !== video) throw new Error('视频页面已切换。');
+    if (videoId((await chrome.tabs.get(tabId)).url) !== video) {
+      throw new Error('视频页面已切换，请重新启动。');
+    }
 
     await chrome.storage.session.remove('captureNotice');
     await chrome.storage.session.set({ liveCapture: session });
-    const playback = await render(tabId, { type: 'start', id: session.id, synchronized: session.synchronized });
-    if (!playback) throw new Error('无法连接 YouTube 播放器，请刷新页面后重试。');
-    const result = await chrome.runtime.sendMessage({
-      target: 'offscreen', type: 'start', id: session.id, streamId, provider, key: apiKey, playback,
-      synchronized: session.synchronized, originalOnly: originalOnly === true, targetLanguage,
+
+    const playback = await sendToOverlay(tabId, {
+      type: 'start',
+      id: session.id,
+      originalOnly: session.originalOnly,
+      targetLanguage,
     });
-    if (!result?.ok) throw new Error(result?.error || '音频捕获没有启动。');
-    if (session.synchronized) {
-      const viewer = await chrome.tabs.create({ url: `${viewerURL}#${session.id}`, openerTabId: tabId });
-      session.viewerTabId = viewer.id;
-      await chrome.storage.session.set({ liveCapture: session });
-    }
+    if (!playback) throw new Error('无法连接 YouTube 播放器，请刷新页面后重试。');
+
+    const result = await chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type: 'start',
+      id: session.id,
+      streamId,
+      asrProvider,
+      asrKey: resolvedAsrKey,
+      translateProvider,
+      translateKey: resolvedTranslateKey,
+      sourceLanguage,
+      originalOnly: session.originalOnly,
+      targetLanguage,
+      playback,
+    });
+    if (!result?.ok) throw new Error(result?.error || '无法启动实时语音识别。');
   } catch (error) {
     await stop(session);
-    if (error.message?.includes('invoked')) throw new Error('请在 YouTube 页面点击 Chrome 工具栏里的扩展图标，再启动字幕。');
-    throw new Error(error.message || '音频捕获没有启动。');
+    if (error.message?.includes('invoked')) {
+      throw new Error('请先在 YouTube 页面点击工具栏上的扩展图标，再启动字幕。');
+    }
+    throw new Error(error.message || '实时字幕启动失败。');
   }
-  await chrome.storage.session.set({
-    apiKeys: { ...apiKeys, [provider]: apiKey }, selectedProvider: provider, synchronized: session.synchronized,
-    originalOnly: originalOnly === true, targetLanguage,
+
+  const nextKeys = { ...apiKeys, [asrProvider]: resolvedAsrKey };
+  if (!originalOnly && resolvedTranslateKey) {
+    nextKeys[translateProvider] = resolvedTranslateKey;
+  }
+
+  await chrome.storage.local.set({
+    apiKeys: nextKeys,
+    asrProvider,
+    translateProvider,
+    sourceLanguage,
+    originalOnly: Boolean(originalOnly),
+    targetLanguage,
   });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message.target !== 'background' || sender.id !== chrome.runtime.id) return;
+
   if (sender.url === offscreenURL && message.type === 'captureEvent') {
     const operation = enqueue(async () => {
       const { liveCapture } = await chrome.storage.session.get('liveCapture');
       if (liveCapture?.id !== message.id) return;
-      const { id, original, translated, targetLanguage, notice, sequence, revision, expiresAt } = message;
-      if (message.ended) await stop(liveCapture, notice);
-      else await render(liveCapture.tabId, { type: 'caption', id, original, translated, targetLanguage, notice, sequence, revision, expiresAt });
+      if (message.ended) {
+        await stop(liveCapture, message.notice || '');
+      } else {
+        await sendToOverlay(liveCapture.tabId, { ...message, type: 'captionEvent' });
+      }
     });
     operation.then(() => reply(), () => reply());
-    return true;
-  }
-
-  if (sender.url?.split('#')[0] === viewerURL && message.type === 'stop') {
-    enqueue(async () => {
-      const { liveCapture } = await chrome.storage.session.get('liveCapture');
-      if (liveCapture?.id === message.id && liveCapture.viewerTabId === sender.tab?.id) {
-        await stop(liveCapture, message.notice || '');
-      }
-    }).then(() => reply({ ok: true }), () => reply({ error: '无法停止同步观看。' }));
     return true;
   }
 
@@ -119,10 +185,25 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     const operation = enqueue(async () => {
       const { liveCapture } = await chrome.storage.session.get('liveCapture');
       if (liveCapture?.id !== message.id || liveCapture.tabId !== sender.tab.id) return;
-      const { id, playing, revision } = message;
-      await chrome.runtime.sendMessage({ target: 'offscreen', type: 'playback', id, playing, revision });
+      await chrome.runtime.sendMessage({
+        target: 'offscreen',
+        type: 'playback',
+        id: message.id,
+        playing: message.playing,
+        revision: message.revision,
+      }).catch(() => {});
     });
     operation.then(() => reply(), () => reply());
+    return true;
+  }
+
+  if (sender.tab && sender.frameId === 0 && message.type === 'overlayStop') {
+    enqueue(async () => {
+      const { liveCapture } = await chrome.storage.session.get('liveCapture');
+      if (liveCapture?.id === message.id && liveCapture.tabId === sender.tab.id) {
+        await stop(liveCapture);
+      }
+    }).then(() => reply({ ok: true }), () => reply({ ok: false }));
     return true;
   }
 
@@ -130,12 +211,20 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   enqueue(async () => {
     if (message.type === 'start') {
       await start(message);
-    } else {
+    } else if (message.type === 'stop') {
       const { liveCapture } = await chrome.storage.session.get('liveCapture');
       if (liveCapture) await stop(liveCapture);
-      await chrome.storage.session.remove(message.type === 'forget' ? ['apiKeys', 'captureNotice'] : 'captureNotice');
+      await chrome.storage.session.remove('captureNotice');
+    } else if (message.type === 'forget') {
+      const { liveCapture } = await chrome.storage.session.get('liveCapture');
+      if (liveCapture) await stop(liveCapture);
+      await chrome.storage.local.remove('apiKeys');
+      await chrome.storage.session.remove('captureNotice');
     }
-  }).then(() => reply({ ok: true }), error => reply({ error: error.message }));
+  }).then(
+    () => reply({ ok: true }),
+    (error) => reply({ error: error.message })
+  );
   return true;
 });
 
@@ -145,15 +234,13 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     const { liveCapture } = await chrome.storage.session.get('liveCapture');
     if (liveCapture?.tabId === tabId && (change.status === 'loading' || videoId(change.url) !== liveCapture.video)) {
       await stop(liveCapture);
-    } else if (liveCapture?.viewerTabId === tabId && change.url && !change.url.startsWith(`${viewerURL}#`)) {
-      await stop(liveCapture);
     }
   });
 });
 
-chrome.tabs.onRemoved.addListener(tabId => {
+chrome.tabs.onRemoved.addListener((tabId) => {
   void enqueue(async () => {
     const { liveCapture } = await chrome.storage.session.get('liveCapture');
-    if (liveCapture && (liveCapture.tabId === tabId || liveCapture.viewerTabId === tabId)) await stop(liveCapture);
+    if (liveCapture?.tabId === tabId) await stop(liveCapture);
   });
 });

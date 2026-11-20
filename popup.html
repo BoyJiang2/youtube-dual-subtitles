@@ -3,43 +3,65 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>YouTube 双语字幕</title>
+  <title>YouTube 双语直播字幕</title>
   <link rel="stylesheet" href="popup.css">
   <script type="module" src="popup.js"></script>
 </head>
 <body>
   <main>
     <header>
-      <span>YouTube</span>
+      <div class="badge">YouTube 实时同传 v2.0</div>
       <h1>双语直播字幕</h1>
     </header>
+
     <form>
-      <label for="provider">识别和翻译服务</label>
-      <select id="provider">
-        <option value="openai">OpenAI</option>
-        <option value="deepseek">DeepSeek</option>
-      </select>
-      <label for="key">API 密钥</label>
-      <input id="key" type="password" autocomplete="off" spellcheck="false" maxlength="512" aria-describedby="key-note">
-      <p class="muted" id="key-note">密钥仅保留在当前 Chrome 会话。</p>
-      <label for="synchronized">播放模式</label>
-      <select id="synchronized">
-        <option value="yes">同步观看 · 画面和声音延后约 8 秒</option>
-        <option value="no">直接在 YouTube 显示字幕</option>
-      </select>
-      <label for="subtitle-mode">字幕内容</label>
-      <select id="subtitle-mode">
-        <option value="dual">原文 + 翻译</option>
-        <option value="original">只显示原文</option>
-      </select>
-      <div id="target-setting">
-        <label for="target-language">翻译成</label>
-        <select id="target-language"></select>
-      </div>
-      <button id="toggle" type="submit" disabled>启动字幕</button>
+      <section class="group">
+        <label for="asr-provider">流式语音识别引擎</label>
+        <select id="asr-provider">
+          <option value="deepgram">Deepgram Nova-3（流式推荐 · 极速多语）</option>
+          <option value="openai">OpenAI Realtime（gpt-4o-mini-transcribe）</option>
+        </select>
+
+        <label for="asr-key" id="asr-key-label">Deepgram API 密钥</label>
+        <input id="asr-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
+
+        <label for="source-language">直播原语（可选指定以提高准确率）</label>
+        <select id="source-language"></select>
+      </section>
+
+      <section class="group">
+        <label for="subtitle-mode">字幕模式</label>
+        <select id="subtitle-mode">
+          <option value="dual">原文 + 上下文实时翻译</option>
+          <option value="original">仅显示实时原文</option>
+        </select>
+
+        <div id="translate-settings">
+          <label for="translate-provider">翻译引擎（流式输出）</label>
+          <select id="translate-provider">
+            <option value="deepseek">DeepSeek（deepseek-chat · 高性价比）</option>
+            <option value="openai">OpenAI（gpt-4.1-mini）</option>
+          </select>
+
+          <div id="translate-key-group">
+            <label for="translate-key" id="translate-key-label">DeepSeek API 密钥</label>
+            <input id="translate-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
+          </div>
+          <p class="muted" id="shared-key-note" hidden>与语音识别共用同一把 OpenAI API 密钥。</p>
+
+          <label for="target-language">翻译目标语言</label>
+          <select id="target-language"></select>
+        </div>
+      </section>
+
+      <button id="toggle" type="submit" disabled>启动实时字幕</button>
     </form>
+
     <p id="message" role="status" aria-live="polite"></p>
-    <button id="forget" type="button" hidden>清除本次会话的密钥</button>
+    <div class="footer-row">
+      <span class="muted">密钥仅保存在本机 Chrome 扩展存储中</span>
+      <button id="forget" type="button" hidden>清除密钥</button>
+    </div>
   </main>
 </body>
 </html>

@@ -1,59 +1,26 @@
-import { transcribe, translate } from './api.js';
+import { StreamingASR, getAsrSampleRate } from './streaming-asr.js';
+import { ContextualTranslator } from './translator.js';
 
-let active;
-const maxInFlight = 3;
-const maxCaptionAge = 4000;
+let active = null;
+const MAX_IN_FLIGHT_TRANSLATIONS = 3;
 
-function publish(session, event) {
-  return chrome.runtime.sendMessage({ target: 'background', type: 'captureEvent', id: session.id, ...event })
-    .catch(() => {});
+function publish(session, payload) {
+  return chrome.runtime.sendMessage({
+    target: 'background',
+    type: 'captureEvent',
+    id: session.id,
+    ...payload,
+  }).catch(() => {});
 }
 
-function openSynchronizedView(session, geometry) {
-  const mimeType = 'video/webm;codecs=vp8,opus';
-  const recorder = new MediaRecorder(session.stream, { mimeType, videoBitsPerSecond: 2_800_000 });
-  const channel = new BroadcastChannel(`captions-${session.id}`);
-  const view = session.view = { recorder, channel };
-  channel.onmessage = ({ data }) => {
-    if (data.type !== 'ready') return;
-    if (recorder.state !== 'inactive') {
-      channel.postMessage({ type: 'closed', notice: '同步页面已刷新。请在 YouTube 页面重新启动。' });
-      void publish(session, { ended: true });
-      return;
-    }
-    view.startedAt = performance.now();
-    session.worklet.port.postMessage({ playing: session.playing, revision: session.revision });
-    channel.postMessage({ type: 'init', mimeType, geometry });
-    recorder.start(250);
-  };
-  recorder.ondataavailable = ({ data }) => {
-    if (active === session && data.size) channel.postMessage({ type: 'media', chunk: data });
-  };
-  recorder.onerror = () => void publish(session, { ended: true, notice: '同步视频编码已中断，请重新启动。' });
-}
-
-function makeWav(samples, rate) {
-  const header = new DataView(new ArrayBuffer(44));
-  const tag = (offset, value) => {
-    for (let i = 0; i < value.length; i++) header.setUint8(offset + i, value.charCodeAt(i));
-  };
-  tag(0, 'RIFF');
-  header.setUint32(4, 36 + samples.byteLength, true);
-  tag(8, 'WAVEfmt ');
-  header.setUint32(16, 16, true);
-  header.setUint16(20, 1, true);
-  header.setUint16(22, 1, true);
-  header.setUint32(24, rate, true);
-  header.setUint32(28, rate * 2, true);
-  header.setUint16(32, 2, true);
-  header.setUint16(34, 16, true);
-  tag(36, 'data');
-  header.setUint32(40, samples.byteLength, true);
-  return new Blob([header.buffer, samples], { type: 'audio/wav' });
-}
-
-function cancelPending(session) {
-  for (const controller of session.inFlight.values()) controller.abort();
+function cancelTranslations(session) {
+  if (session.previewController) {
+    session.previewController.abort();
+    session.previewController = null;
+  }
+  for (const controller of session.inFlight.values()) {
+    controller.abort();
+  }
   session.inFlight.clear();
 }
 
@@ -61,132 +28,298 @@ function updatePlayback({ id, playing, revision }) {
   if (!active || active.id !== id || revision <= active.revision) return;
   active.revision = revision;
   active.playing = playing;
-  if (!active.view) cancelPending(active);
+  if (!playing) {
+    active.asr?.flush();
+  }
   active.worklet?.port.postMessage({ playing, revision });
 }
 
-async function processChunk(session, { audio, audioEnd, voiceStart, voiceEnd, revision }) {
-  const { provider, key, context, inFlight, view, targetLanguage } = session;
-  if (view && view.startedAt === undefined) return;
-  const age = Math.max(0, (context.currentTime - audioEnd) * 1000);
-  const remaining = (view ? 5500 : maxCaptionAge) - age;
-  if (remaining <= 0) return;
-  const offset = view ? (performance.now() - view.startedAt) / 1000 - context.currentTime : 0;
-  const startTime = Math.max(0, voiceStart + offset);
-  const endTime = voiceEnd + offset;
-  const sequence = ++session.sequence;
-  const expiresAt = Date.now() + remaining;
-  if (inFlight.size >= (view ? 5 : maxInFlight)) {
-    const [oldest] = inFlight.keys();
-    inFlight.get(oldest).abort();
-    inFlight.delete(oldest);
+async function runPreviewTranslation(session, interimText) {
+  if (session.originalOnly || !session.translator || Date.now() < session.translateResumeAt) return;
+  const now = Date.now();
+  if (now - session.lastPreviewAt < 1200) return;
+  if (interimText === session.lastPreviewText) return;
+
+  // Trigger preview only when speaker has been talking continuously without a pause
+  const wordCount = interimText.trim().split(/\s+/).length;
+  if (interimText.length < 40 && wordCount < 8) return;
+
+  session.lastPreviewAt = now;
+  session.lastPreviewText = interimText;
+
+  if (session.previewController) {
+    session.previewController.abort();
   }
   const controller = new AbortController();
-  const { signal } = controller;
-  inFlight.set(sequence, controller);
-  const timeout = setTimeout(() => controller.abort(), remaining);
-  let originalTimer;
-  let original;
-
-  function show(translated = '') {
-    if (signal.aborted || Date.now() >= expiresAt) return;
-    if (view) {
-      if (endTime > startTime) {
-        view.channel.postMessage({ type: 'caption', sequence, original, translated, targetLanguage, startTime, endTime });
-      }
-    } else if (sequence >= session.latestDisplayed) {
-      session.latestDisplayed = sequence;
-      void publish(session, { original, translated, targetLanguage, sequence, revision, expiresAt });
-    }
-  }
+  session.previewController = controller;
+  const currentRevision = session.revision;
 
   try {
-    original = await transcribe(provider, key, makeWav(audio, context.sampleRate), signal);
-    if (!original || signal.aborted || (!view && sequence < session.latestDisplayed)) return;
-    if (session.originalOnly) {
-      show();
-      return;
+    let lastSent = 0;
+    const translated = await session.translator.translateStream(interimText, {
+      signal: controller.signal,
+      commitToHistory: false,
+      onDelta: (partial) => {
+        if (active !== session || controller.signal.aborted) return;
+        const t = Date.now();
+        if (t - lastSent >= 80) {
+          lastSent = t;
+          void publish(session, {
+            event: 'interimTranslation',
+            translated: partial,
+            targetLanguage: session.targetLanguage,
+            revision: currentRevision,
+          });
+        }
+      },
+    });
+    if (active === session && !controller.signal.aborted && translated) {
+      void publish(session, {
+        event: 'interimTranslation',
+        translated,
+        targetLanguage: session.targetLanguage,
+        revision: currentRevision,
+      });
     }
-    // A fast translation can appear with the original as one pair.
-    if (view) show();
-    else {
-      originalTimer = setTimeout(() => {
-        const [oldest] = inFlight.keys();
-        if (oldest === sequence) show();
-      }, 650);
+  } catch {
+    // Preview translation errors are non-fatal; wait for final utterance
+  } finally {
+    if (session.previewController === controller) {
+      session.previewController = null;
     }
-    const translated = await translate(provider, key, original, targetLanguage, signal);
-    show(translated);
+  }
+}
+
+async function translateFinal(session, utteranceId, original, revision) {
+  if (session.originalOnly || !session.translator) return;
+  if (Date.now() < session.translateResumeAt) return;
+
+  // Cap concurrent translations so slow networks don't pile up stale requests
+  if (session.inFlight.size >= MAX_IN_FLIGHT_TRANSLATIONS) {
+    const [oldestId] = session.inFlight.keys();
+    session.inFlight.get(oldestId)?.abort();
+    session.inFlight.delete(oldestId);
+  }
+
+  const controller = new AbortController();
+  session.inFlight.set(utteranceId, controller);
+
+  try {
+    let lastSent = 0;
+    const finalTranslated = await session.translator.translateStream(original, {
+      signal: controller.signal,
+      commitToHistory: true,
+      onDelta: (partial) => {
+        if (active !== session || controller.signal.aborted) return;
+        const now = Date.now();
+        if (now - lastSent >= 60) {
+          lastSent = now;
+          void publish(session, {
+            event: 'translation',
+            utteranceId,
+            translated: partial,
+            done: false,
+            targetLanguage: session.targetLanguage,
+            revision,
+          });
+        }
+      },
+    });
+
+    if (active === session && !controller.signal.aborted && finalTranslated) {
+      void publish(session, {
+        event: 'translation',
+        utteranceId,
+        translated: finalTranslated,
+        done: true,
+        targetLanguage: session.targetLanguage,
+        revision,
+      });
+    }
   } catch (error) {
-    if (signal.aborted) return;
+    if (controller.signal.aborted || active !== session) return;
     if (error.fatal) {
       session.playing = false;
-      cancelPending(session);
+      cancelTranslations(session);
       void publish(session, { ended: true, notice: error.message });
       return;
     }
-    session.resumeAt = Math.max(session.resumeAt, Date.now() + (error.backoff ?? 2000));
-    if (view) view.channel.postMessage({ type: 'notice', notice: error.message });
-    else if (sequence >= session.latestDisplayed) {
-      void publish(session, { original, revision, sequence, expiresAt, notice: error.message });
-    }
+    session.translateResumeAt = Math.max(session.translateResumeAt, Date.now() + (error.backoff ?? 2500));
+    void publish(session, { event: 'notice', notice: error.message, revision });
   } finally {
-    clearTimeout(originalTimer);
-    clearTimeout(timeout);
-    inFlight.delete(sequence);
+    session.inFlight.delete(utteranceId);
   }
 }
 
 async function stop() {
   const session = active;
   if (!session) return;
-  active = undefined;
-  cancelPending(session);
-  if (session.view) {
-    const { recorder, channel } = session.view;
-    if (recorder.state !== 'inactive') recorder.stop();
-    channel.close();
-  }
+  active = null;
+  cancelTranslations(session);
+  session.asr?.close();
   session.worklet?.port.close();
-  for (const track of session.stream?.getTracks() ?? []) track.stop();
-  if (session.context && session.context.state !== 'closed') await session.context.close();
+  for (const track of session.stream?.getTracks() ?? []) {
+    track.stop();
+  }
+  if (session.context && session.context.state !== 'closed') {
+    await session.context.close().catch(() => {});
+  }
 }
 
-async function start({ id, streamId, provider, key, playback, synchronized, originalOnly, targetLanguage }) {
-  if (active) throw new Error('字幕已经启动。');
-  const session = { id, provider, key, originalOnly, targetLanguage, ...playback,
-    inFlight: new Map(), sequence: 0, latestDisplayed: 0, resumeAt: 0 };
+async function start({
+  id,
+  streamId,
+  asrProvider,
+  asrKey,
+  translateProvider,
+  translateKey,
+  sourceLanguage,
+  originalOnly,
+  targetLanguage,
+  playback,
+}) {
+  if (active) throw new Error('字幕已在运行中，请先停止。');
+
+  const session = {
+    id,
+    asrProvider,
+    translateProvider,
+    sourceLanguage,
+    originalOnly: Boolean(originalOnly),
+    targetLanguage,
+    playing: Boolean(playback?.playing),
+    revision: playback?.revision || 0,
+    utteranceId: 0,
+    inFlight: new Map(),
+    previewController: null,
+    lastPreviewAt: 0,
+    lastPreviewText: '',
+    translateResumeAt: 0,
+  };
   active = session;
+
   try {
-    session.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
-      video: synchronized ? { mandatory: {
-        chromeMediaSource: 'tab', chromeMediaSourceId: streamId,
-        maxWidth: 1600, maxHeight: 1000, maxFrameRate: 30,
-      } } : false,
-    });
-    for (const track of session.stream.getTracks()) {
-      track.addEventListener('ended', () => {
-        if (active === session) void publish(session, { ended: true, notice: '标签页捕获已结束。' });
+    // 1. Initialize contextual translator if needed
+    if (!session.originalOnly) {
+      session.translator = new ContextualTranslator({
+        provider: translateProvider,
+        apiKey: translateKey,
+        targetLanguage,
       });
     }
 
-    const context = session.context = new AudioContext({ sampleRate: 48_000 });
+    // 2. Connect Streaming WebSocket ASR first (validates key & network immediately)
+    const targetRate = getAsrSampleRate(asrProvider);
+    session.asr = new StreamingASR({
+      provider: asrProvider,
+      apiKey: asrKey,
+      sourceLanguage,
+      onStatus: (notice) => {
+        if (active === session) {
+          void publish(session, { event: 'status', notice, revision: session.revision });
+        }
+      },
+      onInterim: (text) => {
+        if (active !== session) return;
+        void publish(session, {
+          event: 'interim',
+          text,
+          revision: session.revision,
+        });
+        if (text) {
+          void runPreviewTranslation(session, text);
+        }
+      },
+      onFinal: (text) => {
+        if (active !== session || !text) return;
+        if (session.previewController) {
+          session.previewController.abort();
+          session.previewController = null;
+        }
+        session.lastPreviewText = '';
+        const utteranceId = ++session.utteranceId;
+        const rev = session.revision;
+        void publish(session, {
+          event: 'final',
+          utteranceId,
+          original: text,
+          originalOnly: session.originalOnly,
+          targetLanguage: session.targetLanguage,
+          revision: rev,
+        });
+        if (!session.originalOnly) {
+          void translateFinal(session, utteranceId, text, rev);
+        }
+      },
+      onError: (error) => {
+        if (active !== session) return;
+        if (error.fatal) {
+          session.playing = false;
+          cancelTranslations(session);
+          void publish(session, { ended: true, notice: error.message });
+        } else {
+          void publish(session, { event: 'notice', notice: error.message, revision: session.revision });
+        }
+      },
+    });
+
+    await session.asr.connect();
+
+    // 3. Capture tab audio only (zero video encoding overhead!)
+    session.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'tab',
+          chromeMediaSourceId: streamId,
+        },
+      },
+      video: false,
+    });
+
+    for (const track of session.stream.getTracks()) {
+      track.addEventListener('ended', () => {
+        if (active === session) {
+          void publish(session, { ended: true, notice: '标签页音频捕获已结束。' });
+        }
+      });
+    }
+
+    // 4. Route audio: source -> speakers (normal playback) AND source -> worklet -> silentGain -> destination
+    const context = (session.context = new AudioContext());
     const source = context.createMediaStreamSource(session.stream);
-    if (!synchronized) source.connect(context.destination);
+    source.connect(context.destination);
+
     await context.audioWorklet.addModule('audio-worklet.js');
-    const worklet = session.worklet = new AudioWorkletNode(context, 'caption-audio', {
-      channelCount: 1, channelCountMode: 'explicit',
-      processorOptions: { playing: session.playing, revision: session.revision },
-    });
+    const worklet = (session.worklet = new AudioWorkletNode(context, 'streaming-audio', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 2,
+      channelCountMode: 'explicit',
+      processorOptions: {
+        targetRate,
+        chunkMs: 100,
+        playing: session.playing,
+        revision: session.revision,
+      },
+    }));
+
+    const silentGain = context.createGain();
+    silentGain.gain.value = 0;
+    source.connect(worklet).connect(silentGain).connect(context.destination);
+
     worklet.port.onmessage = ({ data }) => {
-      if (active !== session || !session.playing || data.revision !== session.revision || Date.now() < session.resumeAt) return;
-      void processChunk(session, data);
+      if (active !== session || !session.playing || data.revision !== session.revision) return;
+      if (data.type === 'pcm' && data.pcm) {
+        session.asr.sendAudio(data.pcm);
+      }
     };
+
     worklet.addEventListener('processorerror', () => {
-      if (active === session) void publish(session, { ended: true, notice: '音频处理已中断，请重新启动字幕。' });
+      if (active === session) {
+        void publish(session, { ended: true, notice: '音频处理意外中断，请重新启动字幕。' });
+      }
     });
-    source.connect(worklet).connect(context.destination);
+
     let timer;
     try {
       await Promise.race([
@@ -198,7 +331,6 @@ async function start({ id, streamId, provider, key, playback, synchronized, orig
     } finally {
       clearTimeout(timer);
     }
-    if (synchronized) openSynchronizedView(session, playback.geometry);
   } catch (error) {
     await stop();
     throw error;
@@ -213,6 +345,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     return;
   }
   const operation = message.type === 'start' ? start(message) : stop();
-  operation.then(() => reply({ ok: true }), () => reply({ error: '无法启用标签页音频。请检查播放器是否正在播放，然后重试。' }));
+  operation.then(
+    () => reply({ ok: true }),
+    (err) => reply({ error: err?.message || '无法启动实时字幕，请检查播放器及网络后重试。' })
+  );
   return true;
 });
