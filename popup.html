@@ -10,13 +10,18 @@
 <body>
   <main>
     <header>
-      <div class="badge">YouTube 实时同传 v2.0</div>
+      <div class="header-top">
+        <span class="badge"><i class="dot"></i>YouTube 实时同传</span>
+        <span class="version">v2.1</span>
+      </div>
       <h1>双语直播字幕</h1>
+      <p class="subtitle">无 CC 外语直播 · 流式识别与上下文翻译</p>
     </header>
 
     <form>
-      <section class="group">
-        <label for="asr-provider">流式语音识别引擎</label>
+      <section class="card">
+        <div class="card-title">语音识别</div>
+        <label for="asr-provider">识别引擎</label>
         <select id="asr-provider">
           <option value="deepgram">Deepgram Nova-3（流式推荐 · 极速多语）</option>
           <option value="openai">OpenAI Realtime（WebSocket 流式）</option>
@@ -26,11 +31,12 @@
         <label for="asr-key" id="asr-key-label">Deepgram API 密钥</label>
         <input id="asr-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
 
-        <label for="source-language">直播原语（可选指定以提高准确率）</label>
+        <label for="source-language">直播原语（指定可提升嘈杂直播准确率）</label>
         <select id="source-language"></select>
       </section>
 
-      <section class="group">
+      <section class="card">
+        <div class="card-title">双语翻译</div>
         <label for="subtitle-mode">字幕模式</label>
         <select id="subtitle-mode">
           <option value="dual">原文 + 上下文实时翻译</option>
@@ -48,7 +54,7 @@
             <label for="translate-key" id="translate-key-label">DeepSeek API 密钥</label>
             <input id="translate-key" type="password" autocomplete="off" spellcheck="false" maxlength="512">
           </div>
-          <p class="muted" id="shared-key-note" hidden>与语音识别共用同一把 OpenAI API 密钥。</p>
+          <p class="shared-pill" id="shared-key-note" hidden>已自动共用上方 OpenAI API 密钥</p>
 
           <label for="target-language">翻译目标语言</label>
           <select id="target-language"></select>
@@ -60,7 +66,7 @@
 
     <p id="message" role="status" aria-live="polite"></p>
     <div class="footer-row">
-      <span class="muted">密钥仅保存在本机 Chrome 扩展存储中</span>
+      <span class="muted">密钥仅保存在本机 Chrome 中</span>
       <button id="forget" type="button" hidden>清除密钥</button>
     </div>
   </main>

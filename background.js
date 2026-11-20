@@ -31,7 +31,7 @@ async function captureDocument() {
 }
 
 function sendToOverlay(tabId, data) {
-  return chrome.tabs.sendMessage(tabId, { target: 'overlay', ...data }).catch(() => null);
+  return chrome.tabs.sendMessage(tabId, { ...data, target: 'overlay' }).catch(() => null);
 }
 
 async function stop(session, notice = '') {
@@ -182,7 +182,8 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         } else if (message.event === 'interim' || message.event === 'final') {
           await chrome.storage.session.remove('liveStatus');
         }
-        await sendToOverlay(liveCapture.tabId, { ...message, type: 'captionEvent' });
+        const { target: _ignored, ...payload } = message;
+        await sendToOverlay(liveCapture.tabId, { ...payload, type: 'captionEvent' });
       }
     });
     operation.then(() => reply(), () => reply());

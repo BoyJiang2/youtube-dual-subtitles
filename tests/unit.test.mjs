@@ -6,13 +6,19 @@ import { StreamingASR, getAsrSampleRate } from '../streaming-asr.js';
 import { ContextualTranslator } from '../translator.js';
 import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLanguages } from '../languages.js';
 
-test('manifest.json is valid MV3 v2.0.3 with required permissions', () => {
+test('manifest.json is valid MV3 v2.1.0 with required permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '2.0.3');
+  assert.equal(manifest.version, '2.1.0');
   assert.ok(manifest.host_permissions.includes('wss://api.deepgram.com/*'));
   assert.ok(manifest.host_permissions.includes('wss://api.openai.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
+});
+
+test('background.js sendToOverlay always forces target="overlay" after spreading data', () => {
+  const code = readFileSync(new URL('../background.js', import.meta.url), 'utf8');
+  assert.ok(code.includes("{ ...data, target: 'overlay' }"));
+  assert.ok(!code.includes("{ target: 'overlay', ...data }"));
 });
 
 test('languages.js exports valid source and target language lists', () => {
