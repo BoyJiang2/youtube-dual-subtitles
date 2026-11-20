@@ -51,12 +51,13 @@ function render() {
   const running = sessionState.liveCapture;
   const apiKeys = localState.apiKeys || {};
   const asrProv = asrProviderEl.value;
+  const asrKeyBucket = asrProv === 'openai-http' ? 'openai' : asrProv;
   const transProv = translateProviderEl.value;
   const isOriginalOnly = modeEl.value === 'original';
-  const sameProvider = !isOriginalOnly && asrProv === transProv;
+  const sameProvider = !isOriginalOnly && asrKeyBucket === transProv;
 
-  asrKeyLabelEl.textContent = asrProv === 'deepgram' ? 'Deepgram API 密钥' : 'OpenAI API 密钥';
-  asrKeyEl.placeholder = apiKeys[asrProv] ? '已保存密钥（留空继续使用）' : `粘贴 ${asrProv === 'deepgram' ? 'Deepgram' : 'OpenAI'} API 密钥`;
+  asrKeyLabelEl.textContent = asrKeyBucket === 'deepgram' ? 'Deepgram API 密钥' : 'OpenAI API 密钥';
+  asrKeyEl.placeholder = apiKeys[asrKeyBucket] ? '已保存密钥（留空继续使用）' : `粘贴 ${asrKeyBucket === 'deepgram' ? 'Deepgram' : 'OpenAI'} API 密钥`;
 
   translateSettingsEl.hidden = isOriginalOnly;
   translateKeyGroupEl.hidden = sameProvider;

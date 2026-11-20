@@ -459,7 +459,7 @@
     stage.classList.remove('faded');
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
-      if (currentId) stage.classList.add('faded');
+      if (currentId && statusPill.hidden) stage.classList.add('faded');
     }, 15_000);
   }
 
@@ -650,12 +650,14 @@
       const { event } = message;
 
       if (event === 'status') {
-        showNotice(message.notice, 3000);
+        // Keep status pill visible until captions actually start arriving
+        const hasCaptions = Boolean(latestFinalId || interimText);
+        showNotice(message.notice, hasCaptions ? 3500 : 0);
         return;
       }
 
       if (event === 'notice') {
-        showNotice(message.notice, 4500);
+        showNotice(message.notice, 8000);
         return;
       }
 

@@ -6,10 +6,10 @@ import { StreamingASR, getAsrSampleRate } from '../streaming-asr.js';
 import { ContextualTranslator } from '../translator.js';
 import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLanguages } from '../languages.js';
 
-test('manifest.json is valid MV3 v2.0.1 with required permissions', () => {
+test('manifest.json is valid MV3 v2.0.2 with required permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '2.0.1');
+  assert.equal(manifest.version, '2.0.2');
   assert.ok(manifest.host_permissions.includes('wss://api.deepgram.com/*'));
   assert.ok(manifest.host_permissions.includes('wss://api.openai.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
@@ -156,9 +156,19 @@ test('StreamingASR Deepgram WebSocket protocol, interim/final stitching, and Clo
   }
 });
 
-test('StreamingASR OpenAI Realtime protocol sends transcription_session.update and parses delta/completed', async () => {
+test('StreamingASR OpenAI Realtime protocol mints ephemeral token, sends session.update, and auto-commits noisy audio', async () => {
   let mockWs;
   const OriginalWebSocket = globalThis.WebSocket;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/v1/realtime/client_secrets')) {
+      return new Response(JSON.stringify({ value: 'ek_test_ephemeral' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
   globalThis.WebSocket = class MockWebSocket {
     static OPEN = 1;
     constructor(url, protocols) {
@@ -193,7 +203,7 @@ test('StreamingASR OpenAI Realtime protocol sends transcription_session.update a
     assert.equal(mockWs.url, 'wss://api.openai.com/v1/realtime?intent=transcription');
     assert.deepEqual(mockWs.protocols, [
       'realtime',
-      'openai-insecure-api-key.sk-test-key',
+      'openai-insecure-api-key.ek_test_ephemeral',
     ]);
 
     const initMsg = JSON.parse(mockWs.sent[0]);
@@ -241,6 +251,7 @@ test('StreamingASR OpenAI Realtime protocol sends transcription_session.update a
     asr.close();
   } finally {
     globalThis.WebSocket = OriginalWebSocket;
+    globalThis.fetch = originalFetch;
   }
 });
 

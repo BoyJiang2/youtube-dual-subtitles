@@ -69,17 +69,18 @@ async function start({
   const saved = await chrome.storage.local.get('apiKeys');
   const apiKeys = saved.apiKeys || {};
 
-  if (!['deepgram', 'openai'].includes(asrProvider)) throw new Error('请选择语音识别服务。');
+  if (!['deepgram', 'openai', 'openai-http'].includes(asrProvider)) throw new Error('请选择语音识别服务。');
   if (!originalOnly && !['deepseek', 'openai'].includes(translateProvider)) throw new Error('请选择翻译服务。');
   if (!sourceLanguages.some((l) => l.code === sourceLanguage)) sourceLanguage = defaultSourceLanguage;
   if (!targetLanguages.includes(targetLanguage)) targetLanguage = defaultTargetLanguage;
 
-  const resolvedAsrKey = asrKey?.trim() || apiKeys[asrProvider];
-  validateKey(resolvedAsrKey, asrProvider === 'deepgram' ? 'Deepgram' : 'OpenAI');
+  const asrKeyBucket = asrProvider === 'openai-http' ? 'openai' : asrProvider;
+  const resolvedAsrKey = asrKey?.trim() || apiKeys[asrKeyBucket];
+  validateKey(resolvedAsrKey, asrKeyBucket === 'deepgram' ? 'Deepgram' : 'OpenAI');
 
   let resolvedTranslateKey = '';
   if (!originalOnly) {
-    if (translateProvider === asrProvider) {
+    if (translateProvider === asrKeyBucket) {
       resolvedTranslateKey = translateKey?.trim() || resolvedAsrKey;
     } else {
       resolvedTranslateKey = translateKey?.trim() || apiKeys[translateProvider];
@@ -149,7 +150,7 @@ async function start({
     throw new Error(error.message || '实时字幕启动失败。');
   }
 
-  const nextKeys = { ...apiKeys, [asrProvider]: resolvedAsrKey };
+  const nextKeys = { ...apiKeys, [asrKeyBucket]: resolvedAsrKey };
   if (!originalOnly && resolvedTranslateKey) {
     nextKeys[translateProvider] = resolvedTranslateKey;
   }

@@ -19,7 +19,8 @@
         <label for="asr-provider">流式语音识别引擎</label>
         <select id="asr-provider">
           <option value="deepgram">Deepgram Nova-3（流式推荐 · 极速多语）</option>
-          <option value="openai">OpenAI Realtime（gpt-4o-mini-transcribe）</option>
+          <option value="openai">OpenAI Realtime（WebSocket 流式）</option>
+          <option value="openai-http">OpenAI 兼容转写（gpt-4o-mini-transcribe · 稳定）</option>
         </select>
 
         <label for="asr-key" id="asr-key-label">Deepgram API 密钥</label>

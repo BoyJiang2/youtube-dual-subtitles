@@ -303,9 +303,7 @@ async function start({
       },
     }));
 
-    const silentGain = context.createGain();
-    silentGain.gain.value = 0;
-    source.connect(worklet).connect(silentGain).connect(context.destination);
+    source.connect(worklet).connect(context.destination);
 
     worklet.port.onmessage = ({ data }) => {
       if (active !== session || !session.playing || data.revision !== session.revision) return;
