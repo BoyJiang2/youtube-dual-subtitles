@@ -12,7 +12,7 @@
     <header>
       <div class="header-top">
         <span class="badge"><i class="dot"></i>YouTube 实时同传</span>
-        <span class="version">v2.2</span>
+        <span class="version">v2.3</span>
       </div>
       <h1>双语直播字幕</h1>
       <p class="subtitle">无 CC 外语直播 · 流式识别与上下文翻译</p>
@@ -61,6 +61,13 @@
           <select id="target-language"></select>
         </div>
       </section>
+
+      <label for="music-mode">直播音乐</label>
+      <select id="music-mode">
+        <option value="identify">检测音乐、翻译歌声并尝试识曲</option>
+        <option value="detect">只检测音乐与歌声</option>
+        <option value="off">关闭音乐检测</option>
+      </select>
 
       <button id="toggle" type="submit" disabled>启动实时字幕</button>
     </form>

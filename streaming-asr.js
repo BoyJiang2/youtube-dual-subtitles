@@ -105,6 +105,7 @@ export class StreamingASR {
     this.openaiVoicedMs = 0;
     this.openaiQuietMs = 0;
     this.noiseFloor = 0.006;
+    this.recentPeak = 0;
 
     // OpenAI HTTP smart-chunked fallback state
     this.httpChunks = [];
@@ -409,20 +410,14 @@ export class StreamingASR {
         audio: int16ToBase64(int16Pcm),
       }));
 
-      if (rms < this.noiseFloor) {
-        this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
-      } else {
-        this.noiseFloor = Math.min(0.08, this.noiseFloor * 0.992 + rms * 0.008);
-      }
-
       this.openaiBufferedMs += chunkMs;
       const isActiveSound = rms > 0.003;
-      const isQuietDip = rms < Math.max(0.005, this.noiseFloor * 1.45);
+      const isQuietDip = this.isQuietDip(rms);
 
       if (isActiveSound) this.openaiVoicedMs += chunkMs;
       this.openaiQuietMs = isQuietDip ? this.openaiQuietMs + chunkMs : 0;
 
-      const naturalPause = this.openaiBufferedMs >= 900 && this.openaiQuietMs >= 200;
+      const naturalPause = this.openaiBufferedMs >= 900 && this.openaiQuietMs >= 350;
       // Live Transcribe already streams before commit; give a continuous clause
       // more room. The economy model needs an early commit to start recognition.
       const maxWindowReached = this.openaiBufferedMs >= (this.liveTranscribe ? 4500 : 2000);
@@ -438,21 +433,26 @@ export class StreamingASR {
     }
   }
 
-  pushHttpAudio(int16Pcm, rms, chunkMs) {
+  isQuietDip(rms) {
     if (rms < this.noiseFloor) {
       this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
     } else {
       this.noiseFloor = Math.min(0.08, this.noiseFloor * 0.992 + rms * 0.008);
     }
 
+    this.recentPeak = Math.max(rms, this.recentPeak * 0.94);
+    return rms < 0.004 || (rms < this.noiseFloor * 1.45 && rms < this.recentPeak * 0.55);
+  }
+
+  pushHttpAudio(int16Pcm, rms, chunkMs) {
     this.httpChunks.push(int16Pcm);
     this.httpBufferedMs += chunkMs;
     const isActiveSound = rms > 0.003;
-    const isQuietDip = rms < Math.max(0.005, this.noiseFloor * 1.45);
+    const isQuietDip = this.isQuietDip(rms);
     if (isActiveSound) this.httpVoicedMs += chunkMs;
     this.httpQuietMs = isQuietDip ? this.httpQuietMs + chunkMs : 0;
 
-    const naturalPause = this.httpBufferedMs >= 1200 && this.httpQuietMs >= 200;
+    const naturalPause = this.httpBufferedMs >= 1200 && this.httpQuietMs >= 300;
     const maxWindowReached = this.httpBufferedMs >= 2400;
 
     if (this.httpVoicedMs >= 400 && (naturalPause || maxWindowReached)) {

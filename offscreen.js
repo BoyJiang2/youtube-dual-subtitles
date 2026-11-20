@@ -1,3 +1,5 @@
+import { CaptionPhrases } from './caption-phrases.js';
+import { MusicListener } from './music.js';
 import { StreamingASR, getAsrSampleRate } from './streaming-asr.js';
 import { ContextualTranslator } from './translator.js';
 
@@ -14,6 +16,9 @@ function publish(session, payload) {
 }
 
 function cancelTranslations(session) {
+  clearTimeout(session.interimTimer);
+  session.interimTimer = null;
+  session.lastInterimAt = 0;
   clearTimeout(session.previewTimer);
   session.preview?.controller.abort();
   session.preview = null;
@@ -25,6 +30,9 @@ function cancelTranslations(session) {
 function updatePlayback({ id, playing, revision }) {
   if (!active || active.id !== id || revision <= active.revision) return;
   cancelTranslations(active);
+  active.phrases?.reset();
+  active.quietMs = 0;
+  active.music?.reset(revision);
   active.revision = revision;
   active.playing = playing;
   if (!playing) active.asr?.flush();
@@ -78,6 +86,7 @@ function startTranslation(session, id, text, final) {
   session.translator.translateStream(text, {
     signal: job.controller.signal,
     commitToHistory: false,
+    lyrics: session.music?.kind === 'singing',
     onDelta: partial => {
       job.partial = partial;
       if (Date.now() - lastSent >= 60) {
@@ -110,20 +119,13 @@ function startTranslation(session, id, text, final) {
   });
 }
 
-function selectUtterance(session, id) {
-  if (id === session.nextId) return;
-  clearTimeout(session.previewTimer);
-  session.preview?.controller.abort();
-  session.preview = null;
-  session.interim = '';
-  session.nextId = id;
-}
-
 async function stop() {
   const session = active;
   if (!session) return;
   active = null;
   cancelTranslations(session);
+  session.phrases?.reset();
+  session.music?.close();
   session.asr?.close();
   session.worklet?.port.close();
   for (const track of session.stream?.getTracks() ?? []) {
@@ -145,6 +147,7 @@ async function start({
   originalOnly,
   targetLanguage,
   playback,
+  musicMode,
 }) {
   if (active) throw new Error('字幕已在运行中，请先停止。');
 
@@ -158,6 +161,9 @@ async function start({
     playing: Boolean(playback?.playing),
     revision: playback?.revision || 0,
     nextId: 1,
+    quietMs: 0,
+    lastInterimAt: 0,
+    interimTimer: null,
     inFlight: new Map(),
     preview: null,
     interim: '',
@@ -178,6 +184,49 @@ async function start({
 
     // 2. Connect Streaming WebSocket ASR first (validates key & network immediately)
     const targetRate = getAsrSampleRate(asrProvider);
+    const paintInterim = () => {
+      session.interimTimer = null;
+      session.lastInterimAt = Date.now();
+      void publish(session, { event: 'interim', utteranceId: session.nextId, text: session.interim, revision: session.revision });
+      queuePreview(session);
+    };
+    const onInterim = text => {
+      if (active !== session || !session.playing || text === session.interim) return;
+      session.interim = text;
+      if (session.interimTimer !== null) return;
+      const wait = session.lastInterimAt + 80 - Date.now();
+      if (wait > 0) session.interimTimer = setTimeout(paintInterim, wait);
+      else paintInterim();
+    };
+    const onFinal = text => {
+      const id = session.nextId;
+      if (active !== session || !session.playing || !text) return;
+      clearTimeout(session.previewTimer);
+      clearTimeout(session.interimTimer);
+      session.interimTimer = null;
+      session.lastInterimAt = 0;
+      session.music?.line(text);
+      const preview = session.preview;
+      const reuse = preview && phrase(text) === phrase(preview.text) &&
+        (!preview.finished || Boolean(preview.partial));
+      const translated = preview && phrase(text).startsWith(phrase(preview.text)) ? preview.partial : '';
+      session.preview = null;
+      session.interim = '';
+      session.nextId = id + 1;
+      void publish(session, {
+        event: 'final', utteranceId: id, original: text, translated, done: Boolean(reuse && preview.finished),
+        originalOnly: session.originalOnly, targetLanguage: session.targetLanguage, revision: session.revision,
+      });
+      if (reuse) {
+        preview.final = true;
+        preview.text = text;
+        if (preview.finished) session.translator.record(text, preview.partial);
+      } else {
+        preview?.controller.abort();
+        if (session.translator && Date.now() >= session.translateResumeAt) startTranslation(session, id, text, true);
+      }
+    };
+    session.phrases = new CaptionPhrases(onInterim, onFinal, sourceLanguage);
     session.asr = new StreamingASR({
       provider: asrProvider,
       apiKey: asrKey,
@@ -187,38 +236,8 @@ async function start({
           void publish(session, { event: 'status', notice, revision: session.revision });
         }
       },
-      onInterim: (text, id = session.nextId) => {
-        if (active !== session || !session.playing || id < session.nextId) return;
-        selectUtterance(session, id);
-        if (text === session.interim) return;
-        session.interim = text;
-        void publish(session, { event: 'interim', utteranceId: id, text, revision: session.revision });
-        queuePreview(session);
-      },
-      onFinal: (text, id = session.nextId) => {
-        if (active !== session || !session.playing || !text || id < session.nextId) return;
-        selectUtterance(session, id);
-        clearTimeout(session.previewTimer);
-        const preview = session.preview;
-        const reuse = preview && phrase(text) === phrase(preview.text) &&
-          (!preview.finished || Boolean(preview.partial));
-        const translated = preview && phrase(text).startsWith(phrase(preview.text)) ? preview.partial : '';
-        session.preview = null;
-        session.interim = '';
-        session.nextId = id + 1;
-        void publish(session, {
-          event: 'final', utteranceId: id, original: text, translated, done: Boolean(reuse && preview.finished),
-          originalOnly: session.originalOnly, targetLanguage: session.targetLanguage, revision: session.revision,
-        });
-        if (reuse) {
-          preview.final = true;
-          preview.text = text;
-          if (preview.finished) session.translator.record(text, preview.partial);
-        } else {
-          preview?.controller.abort();
-          if (session.translator && Date.now() >= session.translateResumeAt) startTranslation(session, id, text, true);
-        }
-      },
+      onInterim: text => { if (session.playing) session.phrases.interim(text); },
+      onFinal: text => { if (session.playing) session.phrases.final(text); },
       onError: (error) => {
         if (active !== session) return;
         if (error.fatal) {
@@ -273,10 +292,29 @@ async function start({
 
     source.connect(worklet).connect(context.destination);
 
+    if (musicMode && musicMode !== 'off') {
+      const unavailable = () => {
+        if (active === session) void publish(session, { event: 'notice', notice: '音乐检测未能启动，语音字幕继续运行。', revision: session.revision });
+      };
+      try {
+        session.music = new MusicListener(targetRate, musicMode === 'identify' ? session.translator : null, (kind, track) => {
+          if (active === session && session.playing) {
+            void publish(session, { event: 'music', kind, track, revision: session.revision });
+          }
+        }, unavailable);
+        session.music.reset(session.revision);
+      } catch {
+        unavailable();
+      }
+    }
+
     worklet.port.onmessage = ({ data }) => {
       if (active !== session || !session.playing || data.revision !== session.revision) return;
       if (data.type === 'pcm' && data.pcm) {
         session.asr.sendAudio(data.pcm, data.rms ?? 0.02, 100);
+        session.quietMs = data.rms < 0.004 ? session.quietMs + 100 : 0;
+        session.phrases.quiet(session.quietMs);
+        session.music?.push(data.pcm);
       }
     };
 

@@ -4,6 +4,7 @@ const asrProviderEl = document.querySelector('#asr-provider');
 const asrKeyEl = document.querySelector('#asr-key');
 const asrKeyLabelEl = document.querySelector('#asr-key-label');
 const sourceLangEl = document.querySelector('#source-language');
+const musicEl = document.querySelector('#music-mode');
 const modeEl = document.querySelector('#subtitle-mode');
 const translateSettingsEl = document.querySelector('#translate-settings');
 const translateProviderEl = document.querySelector('#translate-provider');
@@ -37,6 +38,7 @@ translateProviderEl.value = localState.translateProvider || 'openai';
 sourceLangEl.value = sourceLanguages.some((l) => l.code === localState.sourceLanguage)
   ? localState.sourceLanguage
   : defaultSourceLanguage;
+musicEl.value = localState.musicMode || 'identify';
 modeEl.value = localState.originalOnly ? 'original' : 'dual';
 targetLangEl.value = targetLanguages.includes(localState.targetLanguage)
   ? localState.targetLanguage
@@ -66,7 +68,7 @@ function render() {
   translateKeyEl.placeholder = apiKeys[transProv] ? '已保存密钥（留空继续使用）' : `粘贴 ${transProv === 'deepseek' ? 'DeepSeek' : 'OpenAI'} API 密钥`;
 
   const locked = Boolean(running) || pending;
-  for (const el of [asrProviderEl, asrKeyEl, sourceLangEl, modeEl, translateProviderEl, translateKeyEl, targetLangEl]) {
+  for (const el of [asrProviderEl, asrKeyEl, sourceLangEl, modeEl, musicEl, translateProviderEl, translateKeyEl, targetLangEl]) {
     el.disabled = locked;
   }
 
@@ -113,6 +115,7 @@ async function operate(type) {
       translateProvider: translateProviderEl.value,
       translateKey: type === 'start' ? translateKeyEl.value : undefined,
       sourceLanguage: sourceLangEl.value,
+      musicMode: musicEl.value,
       originalOnly: modeEl.value === 'original',
       targetLanguage: targetLangEl.value,
     });

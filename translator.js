@@ -48,10 +48,10 @@ export class ContextualTranslator {
     }
   }
 
-  buildMessages(original) {
+  buildMessages(original, lyrics = false) {
     const systemPrompt = [
       `You are a real-time live-stream subtitle translator translating spoken audio into natural, concise ${this.languageName} (${this.targetLanguage}).`,
-      'Rules:',
+      lyrics ? 'This utterance is sung. Translate only the words actually transcribed, preserving line meaning without completing the song.' : 'Rules:',
       '1. Use any provided <context> only to keep pronouns, terminology, names, and tone consistent.',
       '2. Translate ONLY the text inside <current>. Do NOT repeat or translate <context>.',
       '3. Keep it natural and subtitle-friendly (concise, spoken style). Preserve names, numbers, and game/tech terms.',
@@ -72,7 +72,7 @@ export class ContextualTranslator {
     ];
   }
 
-  async translateStream(original, { signal, onDelta, commitToHistory = true } = {}) {
+  async translateStream(original, { signal, onDelta, lyrics = false, commitToHistory = true } = {}) {
     const config = translationProviders[this.provider];
     if (!config) throw Object.assign(new Error(`不支持的翻译服务：${this.provider}`), { fatal: true });
 
@@ -90,7 +90,7 @@ export class ContextualTranslator {
         },
         body: JSON.stringify({
           ...config.body,
-          messages: this.buildMessages(original),
+          messages: this.buildMessages(original, lyrics),
         }),
         credentials: 'omit',
         redirect: 'error',

@@ -122,17 +122,26 @@
       letter-spacing: 0.5px;
     }
 
+    .music-label {
+      position: absolute; top: 5%; left: 3%; max-width: 68%;
+      padding: 4px 9px; border-radius: 5px;
+      background: rgba(9, 13, 18, .78); color: #f4fff9;
+      font: 500 14px/1.4 system-ui, sans-serif; pointer-events: none;
+    }
+
     .cue-card {
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: stretch;
+      box-sizing: border-box;
+      width: min(100%, 62ch);
       max-width: 100%;
       padding: 8px 18px;
       border-radius: 12px;
       background: rgba(9, 13, 18, 0.74);
       border: 1px solid rgba(255, 255, 255, 0.1);
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
-      text-align: center;
+      text-align: start;
       text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
       transition: opacity 0.22s ease, transform 0.22s ease, background 0.2s ease;
     }
@@ -446,7 +455,10 @@
   historyList.className = 'history-list';
   drawer.append(drawerHeader, historyList);
 
-  shadow.append(stage, drawer);
+  const musicLabel = document.createElement('div');
+  musicLabel.className = 'music-label';
+  musicLabel.hidden = true;
+  shadow.append(stage, drawer, musicLabel);
 
   const BG_MODES = ['glass', 'solid', 'outline'];
   const BG_LABELS = { glass: '半透', solid: '深底', outline: '无底' };
@@ -657,6 +669,7 @@
   }
 
   function resetState() {
+    musicLabel.hidden = true;
     utterances.clear();
     historyEntries.length = 0;
     historyList.replaceChildren();
@@ -719,6 +732,7 @@
     playing = next;
     revision++;
     if (!playing) {
+      musicLabel.hidden = true;
       latestFinalId = 0;
       interimId = 0;
       previewSource = '';
@@ -792,6 +806,14 @@
 
       if (message.revision !== undefined && message.revision !== revision) return;
 
+      if (event === 'music') {
+        musicLabel.hidden = !message.kind;
+        const kind = message.kind === 'singing' ? '歌声' : '背景音乐';
+        musicLabel.textContent = message.track
+          ? '♪ 可能是 ' + [message.track.title, message.track.artist].filter(Boolean).join(' · ') + '（歌词匹配）'
+          : '♪ ' + kind;
+        return;
+      }
       if (event === 'interim') {
         statusPill.hidden = true;
         if (message.utteranceId <= latestFinalId || message.utteranceId < interimId) return;

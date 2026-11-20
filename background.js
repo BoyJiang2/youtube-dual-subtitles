@@ -3,6 +3,8 @@ import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLa
 const offscreenURL = chrome.runtime.getURL('offscreen.html');
 const popupURL = chrome.runtime.getURL('popup.html');
 let operations = Promise.resolve();
+let route;
+let statusVisible = true;
 
 function enqueue(operation) {
   const next = operations.then(operation);
@@ -39,6 +41,8 @@ async function stop(session, notice = '') {
     await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
+  route = null;
+  statusVisible = false;
   await chrome.storage.session.remove(['liveCapture', 'liveStatus']);
   if (notice) {
     await chrome.storage.session.set({ captureNotice: { tabId: session.tabId, text: notice } });
@@ -56,6 +60,7 @@ function validateKey(key, label) {
 async function start({
   tabId,
   asrProvider = 'openai-live',
+  musicMode = 'identify',
   asrKey,
   translateProvider = 'openai',
   translateKey,
@@ -118,6 +123,8 @@ async function start({
 
     await chrome.storage.session.remove('captureNotice');
     await chrome.storage.session.set({ liveCapture: session });
+    route = session;
+    statusVisible = true;
 
     const playback = await sendToOverlay(tabId, {
       type: 'start',
@@ -131,6 +138,7 @@ async function start({
       target: 'offscreen',
       type: 'start',
       id: session.id,
+      musicMode,
       streamId,
       asrProvider,
       asrKey: resolvedAsrKey,
@@ -157,6 +165,7 @@ async function start({
 
   await chrome.storage.local.set({
     apiKeys: nextKeys,
+    musicMode,
     asrProvider,
     translateProvider,
     sourceLanguage,
@@ -170,16 +179,19 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
 
   if (sender.url === offscreenURL && message.type === 'captureEvent') {
     const operation = enqueue(async () => {
-      const { liveCapture } = await chrome.storage.session.get('liveCapture');
+      const liveCapture = route ?? (await chrome.storage.session.get('liveCapture')).liveCapture;
+      route = liveCapture;
       if (liveCapture?.id !== message.id) return;
       if (message.ended) {
         await stop(liveCapture, message.notice || '');
       } else {
         if (message.event === 'status' || message.event === 'notice') {
+          statusVisible = true;
           await chrome.storage.session.set({
             liveStatus: { tabId: liveCapture.tabId, text: message.notice || '', isError: message.event === 'notice' },
           });
-        } else if (message.event === 'interim' || message.event === 'final') {
+        } else if (statusVisible && (message.event === 'interim' || message.event === 'final')) {
+          statusVisible = false;
           await chrome.storage.session.remove('liveStatus');
         }
         const { target: _ignored, ...payload } = message;
