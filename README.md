@@ -13,6 +13,7 @@ Get live captions on YouTube videos and streams, including those without built-i
 - Show the original alone or alongside a streaming translation. Detect the spoken language automatically or select one of 15. Choose from 47 translation targets.
 - Use OpenAI or Deepgram for transcription and OpenAI or DeepSeek for translation. An HTTP transcription option is available if WebSockets are unavailable.
 - Captions appear as speech arrives and use punctuation and pauses for line breaks. Adjust their position, font size, and background, or copy recent lines from history.
+- Up to three captions stack above the player controls, newest at the bottom. Late translations fill their own row. Each row stays for 4 seconds after its last source update, then fades out over 0.5 seconds.
 - Detect music on-device and translate audible lyrics in bilingual mode. Optional song lookup suggests a title when two distinct lyric fragments match the catalog. Ambiguous covers show the title alone. Instrumental music gets a music indicator.
 
 ## Data

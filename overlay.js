@@ -3,6 +3,9 @@
   if (prev && prev.runtimeId === chrome.runtime?.id) return;
   try { prev?.teardown?.(); } catch {}
 
+  const MAX_CARDS = 3;
+  const HOLD_MS = 4000;
+  const FADE_MS = 500;
   const STORAGE_PREFS_KEY = 'yt_dual_subs_overlay_prefs_v2';
   // bgMode: 'glass' (default translucent dark) | 'solid' (high contrast) | 'outline' (transparent text outline)
   let prefs = { bottomPct: 10, fontScale: 1.0, showHistory: false, bgMode: 'glass' };
@@ -51,13 +54,11 @@
       align-items: center;
       gap: 6px;
       pointer-events: auto;
-      transition: opacity 0.35s ease;
       user-select: text;
     }
 
-    .caption-stage.faded {
-      opacity: 0;
-      pointer-events: none;
+    .caption-stage:not(:has(.cue-card, .status-pill:not([hidden]))) {
+      display: none;
     }
 
     .toolbar {
@@ -143,7 +144,16 @@
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
       text-align: start;
       text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
-      transition: opacity 0.22s ease, transform 0.22s ease, background 0.2s ease;
+      opacity: var(--cue-opacity, 1);
+      transition: opacity 0.18s ease, background 0.2s ease;
+    }
+
+    .cue-card:nth-last-child(2 of .cue-card) { --cue-opacity: 0.76; }
+    .cue-card:nth-last-child(3 of .cue-card) { --cue-opacity: 0.55; }
+    .cue-card.fading {
+      opacity: 0;
+      transition: opacity ${FADE_MS}ms linear;
+      pointer-events: none;
     }
 
     /* Background style variants */
@@ -414,23 +424,22 @@
 
   toolbar.append(dragHandle, div1, btnSmaller, btnLarger, btnBgMode, div2, btnHistory, btnStop);
 
-  const currCard = document.createElement('div');
-  currCard.className = 'cue-card';
-  currCard.hidden = true;
-  const currOrig = document.createElement('div');
-  currOrig.className = 'line-original';
-  currOrig.dir = 'auto';
-  const currTrans = document.createElement('div');
-  currTrans.className = 'line-translated';
-  currTrans.dir = 'auto';
-  currCard.append(currOrig, currTrans);
+  const cardTemplate = document.createElement('div');
+  cardTemplate.className = 'cue-card';
+  const originalLine = document.createElement('div');
+  originalLine.className = 'line-original';
+  originalLine.dir = 'auto';
+  const translatedLine = document.createElement('div');
+  translatedLine.className = 'line-translated';
+  translatedLine.dir = 'auto';
+  cardTemplate.append(originalLine, translatedLine);
 
   const statusPill = document.createElement('div');
   statusPill.className = 'status-pill';
   statusPill.hidden = true;
   statusPill.setAttribute('role', 'status');
 
-  stage.append(toolbar, currCard, statusPill);
+  stage.append(toolbar, statusPill);
 
   // History drawer
   const drawer = document.createElement('aside');
@@ -564,29 +573,17 @@
   let currentId = null;
   let playing = false;
   let revision = 0;
-  let fadeTimer = null;
   let noticeTimer = null;
 
   const utterances = new Map();
   const historyEntries = [];
-  let latestFinalId = 0;
-  let interimId = 0;
-  let previewSource = '';
+  const cards = new Map();
+  let newestId = 0;
   let renderFrame = 0;
-  let interimText = '';
-  let interimTranslated = '';
   let currentTargetLang = '';
 
   function formatTime() {
     return new Date().toTimeString().slice(0, 8);
-  }
-
-  function bumpActivity() {
-    stage.classList.remove('faded');
-    clearTimeout(fadeTimer);
-    fadeTimer = setTimeout(() => {
-      if (currentId && statusPill.hidden) stage.classList.add('faded');
-    }, 4_000);
   }
 
   function showNotice(text, persistMs = 4000, isError = false) {
@@ -595,7 +592,6 @@
     statusPill.dataset.error = String(Boolean(isError));
     statusPill.hidden = !text;
     if (text) {
-      bumpActivity();
       if (persistMs > 0) {
         noticeTimer = setTimeout(() => {
           statusPill.hidden = true;
@@ -611,18 +607,55 @@
     return message.done || next.length >= current.length ? next : current;
   }
 
+  function removeCard(id) {
+    const card = cards.get(id);
+    clearTimeout(card.fadeTimer);
+    clearTimeout(card.removeTimer);
+    card.el.remove();
+    cards.delete(id);
+  }
+
+  function clearCards() {
+    for (const id of cards.keys()) removeCard(id);
+    newestId = 0;
+    cancelAnimationFrame(renderFrame);
+    renderFrame = 0;
+  }
+
+  function cardForSource(id, text) {
+    let card = cards.get(id);
+    if (!card) {
+      // The watermark prevents expired or evicted lines from reappearing on a late final.
+      if (id <= newestId || !text) return;
+      newestId = id;
+      if (cards.size === MAX_CARDS) removeCard(cards.keys().next().value);
+      const el = cardTemplate.cloneNode(true);
+      card = { el, original: '', translated: '', previewSource: '', final: false };
+      cards.set(id, card);
+      stage.insertBefore(el, statusPill);
+    }
+    if (id === newestId && text !== card.original) {
+      clearTimeout(card.fadeTimer);
+      clearTimeout(card.removeTimer);
+      card.el.classList.remove('fading');
+      card.fadeTimer = setTimeout(() => card.el.classList.add('fading'), HOLD_MS);
+      card.removeTimer = setTimeout(() => removeCard(id), HOLD_MS + FADE_MS);
+    }
+    card.original = text;
+    return card;
+  }
+
   function renderCards() {
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
-      const latest = utterances.get(latestFinalId);
-      const original = interimText || latest?.original || '';
-      const translated = interimText ? interimTranslated : latest?.translated || '';
-      currCard.hidden = !original;
-      if (currOrig.textContent !== original) currOrig.textContent = original;
-      if (currTrans.textContent !== translated) currTrans.textContent = translated;
-      currOrig.classList.toggle('interim', Boolean(interimText));
-      currTrans.classList.toggle('preview', Boolean(interimText));
+      for (const card of cards.values()) {
+        const [original, translated] = card.el.children;
+        if (original.textContent !== card.original) original.textContent = card.original;
+        if (translated.textContent !== card.translated) translated.textContent = card.translated;
+        original.classList.toggle('interim', !card.final);
+        translated.classList.toggle('preview', !card.final);
+      }
     });
   }
 
@@ -674,24 +707,18 @@
     historyEntries.length = 0;
     historyList.replaceChildren();
     drawerTitle.textContent = '双语字幕记录';
-    latestFinalId = 0;
-    interimId = 0;
-    previewSource = '';
-    interimText = '';
-    interimTranslated = '';
-    currCard.hidden = true;
+    clearCards();
   }
 
   const PLAYBACK_EVENTS = ['playing', 'canplay', 'timeupdate', 'pause', 'seeking', 'seeked', 'ended', 'emptied'];
 
   function teardown() {
     currentId = null;
-    clearTimeout(fadeTimer);
+    clearCards();
     clearTimeout(noticeTimer);
     for (const event of PLAYBACK_EVENTS) {
       document.removeEventListener(event, onPlayback, true);
     }
-    cancelAnimationFrame(renderFrame);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     host.remove();
     if (globalThis.youtubeDualSubtitlesV2?.teardown === teardown) {
@@ -733,12 +760,7 @@
     revision++;
     if (!playing) {
       musicLabel.hidden = true;
-      latestFinalId = 0;
-      interimId = 0;
-      previewSource = '';
-      interimText = '';
-      interimTranslated = '';
-      renderCards();
+      clearCards();
     }
     safeSend({
       target: 'background',
@@ -760,9 +782,9 @@
       currentId = message.id;
       revision = 0;
       currentTargetLang = message.targetLanguage || '';
-      currTrans.lang = currentTargetLang;
-      currTrans.hidden = Boolean(message.originalOnly);
-      currCard.classList.toggle('bilingual', !message.originalOnly);
+      translatedLine.lang = currentTargetLang;
+      translatedLine.hidden = Boolean(message.originalOnly);
+      cardTemplate.classList.toggle('bilingual', !message.originalOnly);
       resetState();
       attach();
       const player = document.querySelector('#movie_player');
@@ -776,7 +798,8 @@
 
     if (message.type === 'stop') {
       currentId = null;
-      clearTimeout(fadeTimer);
+      clearCards();
+      musicLabel.hidden = true;
       clearTimeout(noticeTimer);
       if (message.notice) {
         showNotice(message.notice, 5000, true);
@@ -794,7 +817,7 @@
       const { event } = message;
 
       if (event === 'status') {
-        const hasCaptions = Boolean(latestFinalId || interimText);
+        const hasCaptions = newestId > 0;
         showNotice(message.notice, hasCaptions ? 3500 : 0, false);
         return;
       }
@@ -814,56 +837,56 @@
           : '♪ ' + kind;
         return;
       }
+      const id = message.utteranceId;
       if (event === 'interim') {
+        if (id < newestId || utterances.has(id) || !message.text) return;
+        const card = cardForSource(id, message.text);
+        if (!card) return;
         statusPill.hidden = true;
-        if (message.utteranceId <= latestFinalId || message.utteranceId < interimId) return;
-        interimText = message.text || '';
-        if (interimId !== message.utteranceId || !interimText.startsWith(previewSource)) {
-          interimTranslated = '';
-          previewSource = '';
+        if (!card.original.startsWith(card.previewSource)) {
+          card.translated = '';
+          card.previewSource = '';
         }
-        interimId = message.utteranceId;
-        bumpActivity();
         renderCards();
       } else if (event === 'interimTranslation') {
+        const card = cards.get(id);
         const source = (message.original || '').replace(/[.。]+$/u, '').trimEnd();
-        if (interimId !== message.utteranceId || !source || !interimText.startsWith(source)) return;
-        const next = visibleTranslation(interimTranslated, message);
-        if (next === message.translated) previewSource = source;
-        interimTranslated = next;
+        if (!card || card.final || !source || !card.original.startsWith(source)) return;
+        card.translated = visibleTranslation(card.translated, message);
+        if (card.translated === message.translated) card.previewSource = source;
         renderCards();
       } else if (event === 'final') {
-        if (message.utteranceId <= latestFinalId || message.utteranceId < interimId) return;
-        statusPill.hidden = true;
-        const carried = interimId === message.utteranceId && message.original.startsWith(previewSource)
-          ? interimTranslated : '';
-        interimText = '';
-        interimTranslated = '';
-        previewSource = '';
-        interimId = 0;
-        latestFinalId = message.utteranceId;
+        if (utterances.has(id) || !message.original) return;
+        const card = cardForSource(id, message.original);
+        const carried = card && message.original.startsWith(card.previewSource) ? card.translated : '';
         const entry = {
-          utteranceId: message.utteranceId,
+          utteranceId: id,
           original: message.original,
           translated: visibleTranslation(carried, message),
           targetLanguage: message.targetLanguage || currentTargetLang,
           time: formatTime(),
         };
-        utterances.set(entry.utteranceId, entry);
+        utterances.set(id, entry);
         appendHistoryItem(entry);
-        bumpActivity();
-        renderCards();
+        if (card) {
+          statusPill.hidden = true;
+          card.final = true;
+          card.translated = entry.translated;
+          renderCards();
+        }
       } else if (event === 'translation') {
-        const entry = utterances.get(message.utteranceId);
+        const entry = utterances.get(id);
         if (!entry) return;
         const next = visibleTranslation(entry.translated, message);
         if (next === entry.translated) return;
         entry.translated = next;
-        if (entry.domTrans) {
-          entry.domTrans.textContent = entry.translated;
-          entry.domTrans.hidden = !entry.translated;
+        entry.domTrans.textContent = next;
+        entry.domTrans.hidden = !next;
+        const card = cards.get(id);
+        if (card) {
+          card.translated = next;
+          renderCards();
         }
-        if (!interimText && latestFinalId === entry.utteranceId) renderCards();
       }
     }
   }
