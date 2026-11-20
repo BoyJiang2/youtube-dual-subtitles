@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube 字幕同步观看</title>
+  <link rel="stylesheet" href="viewer.css">
+  <script type="module" src="viewer.js"></script>
+</head>
+<body>
+  <header>
+    <strong>字幕同步观看</strong>
+    <span id="status" role="status">正在连接 YouTube 标签页…</span>
+    <button id="play" type="button" hidden>播放同步画面</button>
+    <button id="fullscreen" type="button">全屏</button>
+    <button id="stop" type="button">停止同步</button>
+  </header>
+  <main>
+    <section id="stage" aria-label="延时视频和字幕">
+      <video playsinline></video>
+      <div id="captions">
+        <p id="original" dir="auto"></p>
+        <p id="translated" dir="auto"></p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

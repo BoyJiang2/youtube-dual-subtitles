@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube 双语直播字幕",
+  "description": "识别 YouTube 直播音频，显示原文或多语言翻译，可在缓冲窗口同步播放。",
+  "version": "1.2.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "offscreen", "scripting", "storage", "tabCapture"],
+  "host_permissions": ["https://api.openai.com/*", "https://api.deepseek.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "YouTube 双语直播字幕" }
+}

@@ -1,0 +1,30 @@
+:root {
+  color-scheme: dark;
+  font: 13px/1.55 system-ui, sans-serif;
+  color: #edf3f0;
+  background: #151b19;
+}
+
+body { width: 315px; margin: 0; }
+main { padding: 20px; }
+header { padding-bottom: 15px; border-bottom: 1px solid #34403b; margin-bottom: 15px; }
+header span { color: #9ee7c5; font-size: 12px; }
+h1 { margin: 1px 0 0; font-size: 22px; letter-spacing: .02em; }
+label { display: block; margin: 12px 0 5px; font-weight: 600; }
+input, select, button { font: inherit; box-sizing: border-box; }
+input, select {
+  width: 100%; min-height: 36px; padding: 5px 9px; color: inherit;
+  background: #202a25; border: 1px solid #495b52; border-radius: 6px;
+}
+input::placeholder, .muted { color: #b5c3bb; }
+.muted { margin: 5px 0 0; font-size: 11px; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid #b9ffe0; outline-offset: 2px; }
+:disabled { opacity: .58; cursor: default; }
+#toggle { width: 100%; margin-top: 14px; min-height: 38px; border: 0; border-radius: 6px;
+  background: #a1ebc8; color: #14281e; font-weight: 750; }
+#toggle[data-stopping="true"] { background: #f9d6bf; color: #382116; }
+#message { color: #c7d5cd; margin: 10px 0 0; overflow-wrap: anywhere; }
+#message:empty { margin: 0; }
+#message[data-error="true"] { color: #ffcaad; }
+#forget { margin: 12px 0 0; border: 0; padding: 0; background: none; color: #a1ebc8; }

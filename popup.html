@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube 双语字幕</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <span>YouTube</span>
+      <h1>双语直播字幕</h1>
+    </header>
+    <form>
+      <label for="provider">识别和翻译服务</label>
+      <select id="provider">
+        <option value="openai">OpenAI</option>
+        <option value="deepseek">DeepSeek</option>
+      </select>
+      <label for="key">API 密钥</label>
+      <input id="key" type="password" autocomplete="off" spellcheck="false" maxlength="512" aria-describedby="key-note">
+      <p class="muted" id="key-note">密钥仅保留在当前 Chrome 会话。</p>
+      <label for="synchronized">播放模式</label>
+      <select id="synchronized">
+        <option value="yes">同步观看 · 画面和声音延后约 8 秒</option>
+        <option value="no">直接在 YouTube 显示字幕</option>
+      </select>
+      <label for="subtitle-mode">字幕内容</label>
+      <select id="subtitle-mode">
+        <option value="dual">原文 + 翻译</option>
+        <option value="original">只显示原文</option>
+      </select>
+      <div id="target-setting">
+        <label for="target-language">翻译成</label>
+        <select id="target-language"></select>
+      </div>
+      <button id="toggle" type="submit" disabled>启动字幕</button>
+    </form>
+    <p id="message" role="status" aria-live="polite"></p>
+    <button id="forget" type="button" hidden>清除本次会话的密钥</button>
+  </main>
+</body>
+</html>
