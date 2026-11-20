@@ -78,8 +78,13 @@ function render() {
 
   if (pending) return;
   const notice = sessionState.captureNotice;
+  const liveStatus = sessionState.liveStatus;
   if (running) {
-    report(running.tabId === tab?.id ? '实时字幕正在当前页面运行。' : '实时字幕正在另一个 YouTube 标签页运行。');
+    if (liveStatus && liveStatus.tabId === tab?.id && liveStatus.text) {
+      report(liveStatus.text, Boolean(liveStatus.isError));
+    } else {
+      report(running.tabId === tab?.id ? '实时字幕正在当前页面运行。' : '实时字幕正在另一个 YouTube 标签页运行。');
+    }
   } else if (notice && notice.tabId === tab?.id) {
     report(notice.text, true);
   } else {

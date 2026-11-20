@@ -310,7 +310,7 @@ async function start({
     worklet.port.onmessage = ({ data }) => {
       if (active !== session || !session.playing || data.revision !== session.revision) return;
       if (data.type === 'pcm' && data.pcm) {
-        session.asr.sendAudio(data.pcm);
+        session.asr.sendAudio(data.pcm, data.rms ?? 0.02, 100);
       }
     };
 

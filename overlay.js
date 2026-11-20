@@ -581,12 +581,16 @@
   }
 
   function isPlaying(video) {
-    return Boolean(video && !video.paused && !video.seeking && video.readyState >= 2);
+    return Boolean(video && !video.paused && !video.ended);
   }
 
   function onPlayback(event) {
     if (!currentId || !event.target.matches?.('#movie_player video')) return;
-    const next = ['playing', 'seeked'].includes(event.type) && isPlaying(event.target);
+    // Ignore transient 'waiting' micro-buffering on YouTube Live so audio stream isn't killed
+    if (event.type === 'waiting') return;
+    const next = ['playing', 'seeked', 'canplay', 'timeupdate'].includes(event.type)
+      ? isPlaying(event.target)
+      : false;
     if (next === playing) return;
     playing = next;
     revision++;
@@ -604,7 +608,7 @@
     }).catch(() => {});
   }
 
-  for (const event of ['playing', 'pause', 'seeking', 'seeked', 'waiting', 'ended', 'emptied']) {
+  for (const event of ['playing', 'canplay', 'timeupdate', 'pause', 'seeking', 'seeked', 'ended', 'emptied']) {
     document.addEventListener(event, onPlayback, true);
   }
 

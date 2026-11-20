@@ -55,8 +55,51 @@ export class StreamingASR {
 
     // Deepgram accumulation state
     this.pendingFinals = [];
-    // OpenAI delta accumulation state by item_id
+
+    // OpenAI Realtime state (client-driven smart commit so noisy game streams never starve)
     this.itemBuffers = new Map();
+    this.openaiUseBetaFallback = false;
+    this.openaiBufferedMs = 0;
+    this.openaiVoicedMs = 0;
+    this.openaiQuietMs = 0;
+    this.noiseFloor = 0.006;
+  }
+
+  sendOpenAISessionConfig() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const transcription = { model: 'gpt-4o-mini-transcribe' };
+    if (this.sourceLanguage && this.sourceLanguage !== 'multi') {
+      transcription.language = this.sourceLanguage;
+    }
+
+    if (this.openaiUseBetaFallback) {
+      this.ws.send(JSON.stringify({
+        type: 'transcription_session.update',
+        session: {
+          input_audio_format: 'pcm16',
+          input_audio_transcription: transcription,
+          turn_detection: null,
+        },
+      }));
+    } else {
+      // GA Realtime API transcription session schema
+      this.ws.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          type: 'transcription',
+          audio: {
+            input: {
+              format: {
+                type: 'audio/pcm',
+                rate: 24000,
+              },
+              transcription,
+              turn_detection: null,
+            },
+          },
+        },
+      }));
+    }
   }
 
   connect() {
@@ -87,11 +130,10 @@ export class StreamingASR {
           this.ws = new WebSocket(url, ['token', this.apiKey]);
         } else if (this.provider === 'openai') {
           const url = 'wss://api.openai.com/v1/realtime?intent=transcription';
-          this.ws = new WebSocket(url, [
-            'realtime',
-            `openai-insecure-api-key.${this.apiKey}`,
-            'openai-beta.realtime-v1',
-          ]);
+          const protocols = this.openaiUseBetaFallback
+            ? ['realtime', `openai-insecure-api-key.${this.apiKey}`, 'openai-beta.realtime-v1']
+            : ['realtime', `openai-insecure-api-key.${this.apiKey}`];
+          this.ws = new WebSocket(url, protocols);
         } else {
           done(reject, new Error(`不支持的语音识别服务：${this.provider}`));
           return;
@@ -113,30 +155,18 @@ export class StreamingASR {
         this.connectedOnce = true;
         this.reconnectAttempts = 0;
         this.lastAudioSentAt = Date.now();
+        this.openaiBufferedMs = 0;
+        this.openaiVoicedMs = 0;
+        this.openaiQuietMs = 0;
 
         if (this.provider === 'openai') {
-          const transcription = { model: 'gpt-4o-mini-transcribe' };
-          if (this.sourceLanguage && this.sourceLanguage !== 'multi') {
-            transcription.language = this.sourceLanguage;
-          }
-          this.ws.send(JSON.stringify({
-            type: 'transcription_session.update',
-            session: {
-              input_audio_format: 'pcm16',
-              input_audio_transcription: transcription,
-              turn_detection: {
-                type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 450,
-              },
-            },
-          }));
+          this.sendOpenAISessionConfig();
         } else if (this.provider === 'deepgram') {
           this.startKeepAlive();
         }
 
-        this.onStatus?.('已连接实时语音识别');
+        const label = this.provider === 'deepgram' ? 'Deepgram Nova-3' : 'OpenAI Realtime';
+        this.onStatus?.(`已连接 ${label}，正在监听直播音频…`);
         done(resolve);
       };
 
@@ -170,7 +200,6 @@ export class StreamingASR {
         }
         if (this.closed) return;
 
-        // Flush any pending Deepgram partial finals before reconnecting
         if (this.pendingFinals.length) {
           const flushed = joinTranscript(this.pendingFinals);
           this.pendingFinals = [];
@@ -211,17 +240,60 @@ export class StreamingASR {
     }
   }
 
-  sendAudio(int16Pcm) {
+  sendAudio(int16Pcm, rms = 0.02, chunkMs = 100) {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.lastAudioSentAt = Date.now();
+
     if (this.provider === 'deepgram') {
       this.ws.send(int16Pcm.buffer);
-    } else if (this.provider === 'openai') {
+      return;
+    }
+
+    if (this.provider === 'openai') {
       this.ws.send(JSON.stringify({
         type: 'input_audio_buffer.append',
         audio: int16ToBase64(int16Pcm),
       }));
+
+      // Adaptive noise floor tracking so noisy game streams still detect brief speech dips
+      if (rms < this.noiseFloor) {
+        this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
+      } else {
+        this.noiseFloor = Math.min(0.08, this.noiseFloor * 0.992 + rms * 0.008);
+      }
+
+      this.openaiBufferedMs += chunkMs;
+      const isActiveSound = rms > 0.003;
+      const isQuietDip = rms < Math.max(0.005, this.noiseFloor * 1.45);
+
+      if (isActiveSound) {
+        this.openaiVoicedMs += chunkMs;
+      }
+      this.openaiQuietMs = isQuietDip ? this.openaiQuietMs + chunkMs : 0;
+
+      // Commit on natural pause (>= 1.5s buffered & >= 300ms quiet dip)
+      // OR force commit every 3.2s on continuous loud streams (e.g. GTA / action games)
+      const naturalPause = this.openaiBufferedMs >= 1500 && this.openaiQuietMs >= 300;
+      const maxWindowReached = this.openaiBufferedMs >= 3200;
+
+      if (this.openaiVoicedMs >= 400 && (naturalPause || maxWindowReached)) {
+        this.commitOpenAIBuffer();
+      } else if (this.openaiBufferedMs >= 4000 && this.openaiVoicedMs < 400) {
+        // Pure silence for 4s: clear buffer to avoid empty commits
+        this.ws.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+        this.openaiBufferedMs = 0;
+        this.openaiVoicedMs = 0;
+        this.openaiQuietMs = 0;
+      }
     }
+  }
+
+  commitOpenAIBuffer() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    this.openaiBufferedMs = 0;
+    this.openaiVoicedMs = 0;
+    this.openaiQuietMs = 0;
   }
 
   flush() {
@@ -229,6 +301,9 @@ export class StreamingASR {
       const text = joinTranscript(this.pendingFinals);
       this.pendingFinals = [];
       if (text) this.onFinal?.(text);
+    }
+    if (this.provider === 'openai' && this.openaiVoicedMs >= 300) {
+      this.commitOpenAIBuffer();
     }
     this.itemBuffers.clear();
   }
@@ -241,7 +316,6 @@ export class StreamingASR {
         const combined = joinTranscript(this.pendingFinals);
         if (!combined) return;
 
-        // Finalize on natural speech boundary, sentence punctuation, or long run-on speech
         if (data.speech_final || endsWithSentencePunctuation(combined) || combined.length >= 110) {
           this.pendingFinals = [];
           this.onFinal?.(combined);
@@ -266,7 +340,9 @@ export class StreamingASR {
 
   handleOpenAIMessage(data) {
     const { type } = data;
-    if (type === 'conversation.item.input_audio_transcription.delta') {
+    if (type === 'session.updated' || type === 'transcription_session.updated') {
+      this.onStatus?.('OpenAI Realtime 就绪，正在识别语音…');
+    } else if (type === 'conversation.item.input_audio_transcription.delta') {
       const id = data.item_id || 'default';
       const prev = this.itemBuffers.get(id) || '';
       const next = prev + (data.delta || '');
@@ -287,8 +363,15 @@ export class StreamingASR {
     } else if (type === 'error') {
       const errMsg = data.error?.message || 'OpenAI Realtime 返回错误。';
       const code = data.error?.code || '';
+      // If GA session.update schema is rejected on an older endpoint, switch to beta fallback automatically
+      if (!this.openaiUseBetaFallback && /unknown_parameter|invalid_value|session\.update/i.test(`${code} ${errMsg}`)) {
+        this.openaiUseBetaFallback = true;
+        this.onStatus?.('正在切换 OpenAI 兼容协议重连…');
+        try { this.ws?.close(1000, 'fallback'); } catch {}
+        return;
+      }
       const fatal = /invalid_api_key|insufficient_quota|authentication|session_expired/i.test(`${code} ${errMsg}`);
-      this.onError?.(Object.assign(new Error(errMsg), { fatal }));
+      this.onError?.(Object.assign(new Error(`OpenAI: ${errMsg}`), { fatal }));
     }
   }
 

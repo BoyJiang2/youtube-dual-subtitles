@@ -39,7 +39,7 @@ async function stop(session, notice = '') {
     await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop' }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
-  await chrome.storage.session.remove('liveCapture');
+  await chrome.storage.session.remove(['liveCapture', 'liveStatus']);
   if (notice) {
     await chrome.storage.session.set({ captureNotice: { tabId: session.tabId, text: notice } });
   }
@@ -174,6 +174,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (message.ended) {
         await stop(liveCapture, message.notice || '');
       } else {
+        if (message.event === 'status' || message.event === 'notice') {
+          await chrome.storage.session.set({
+            liveStatus: { tabId: liveCapture.tabId, text: message.notice || '', isError: message.event === 'notice' },
+          });
+        } else if (message.event === 'interim' || message.event === 'final') {
+          await chrome.storage.session.remove('liveStatus');
+        }
         await sendToOverlay(liveCapture.tabId, { ...message, type: 'captionEvent' });
       }
     });

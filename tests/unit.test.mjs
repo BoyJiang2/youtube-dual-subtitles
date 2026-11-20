@@ -6,10 +6,10 @@ import { StreamingASR, getAsrSampleRate } from '../streaming-asr.js';
 import { ContextualTranslator } from '../translator.js';
 import { defaultSourceLanguage, defaultTargetLanguage, sourceLanguages, targetLanguages } from '../languages.js';
 
-test('manifest.json is valid MV3 v2.0.0 with required permissions', () => {
+test('manifest.json is valid MV3 v2.0.1 with required permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '2.0.0');
+  assert.equal(manifest.version, '2.0.1');
   assert.ok(manifest.host_permissions.includes('wss://api.deepgram.com/*'));
   assert.ok(manifest.host_permissions.includes('wss://api.openai.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
@@ -194,18 +194,24 @@ test('StreamingASR OpenAI Realtime protocol sends transcription_session.update a
     assert.deepEqual(mockWs.protocols, [
       'realtime',
       'openai-insecure-api-key.sk-test-key',
-      'openai-beta.realtime-v1',
     ]);
 
     const initMsg = JSON.parse(mockWs.sent[0]);
-    assert.equal(initMsg.type, 'transcription_session.update');
-    assert.equal(initMsg.session.input_audio_transcription.model, 'gpt-4o-mini-transcribe');
-    assert.equal(initMsg.session.input_audio_transcription.language, 'ja');
+    assert.equal(initMsg.type, 'session.update');
+    assert.equal(initMsg.session.type, 'transcription');
+    assert.equal(initMsg.session.audio.input.transcription.model, 'gpt-4o-mini-transcribe');
+    assert.equal(initMsg.session.audio.input.transcription.language, 'ja');
+    assert.equal(initMsg.session.audio.input.turn_detection, null);
 
-    asr.sendAudio(new Int16Array([1, 2, 3, 4]));
+    // Simulate 3.2 seconds of continuous loud game audio (32 chunks * 100ms, rms=0.15)
+    for (let i = 0; i < 32; i++) {
+      asr.sendAudio(new Int16Array([1000, -1000, 2000, -2000]), 0.15, 100);
+    }
     const audioMsg = JSON.parse(mockWs.sent[1]);
     assert.equal(audioMsg.type, 'input_audio_buffer.append');
     assert.ok(typeof audioMsg.audio === 'string' && audioMsg.audio.length > 0);
+    // Must auto-commit at 3.2s even without silence!
+    assert.ok(mockWs.sent.some((m) => JSON.parse(m).type === 'input_audio_buffer.commit'));
 
     mockWs.onmessage({
       data: JSON.stringify({
